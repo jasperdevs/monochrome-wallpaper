@@ -314,7 +314,7 @@ def _weather():
         url = (
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            f"&current=temperature_2m,weather_code"
+            f"&current=temperature_2m,apparent_temperature,weather_code"
             f"&temperature_unit=fahrenheit"
         )
         data = json.loads(urllib.request.urlopen(url, timeout=8).read().decode())
@@ -322,6 +322,7 @@ def _weather():
         code = int(cur.get("weather_code", 3))
         w = {
             "temp": round(float(cur.get("temperature_2m", 0))),
+            "feels": round(float(cur.get("apparent_temperature", 0))),
             "desc": WMO_DESC.get(code, "conditions"),
             "code": code,
         }
@@ -394,7 +395,7 @@ def _graph_bg(d, x, y, w, h):
 
 
 # ── render ──────────────────────────────────────────────
-def _render(out, W, H, compact=False):
+def _render(out, W, H):
     now = _snap.get("now", datetime.now())
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
@@ -407,7 +408,7 @@ def _render(out, W, H, compact=False):
     f32 = _font(32, bold=True)
 
     mx = int(W * 0.1)
-    top = 240 if not compact else 160
+    top = 240
     gap = 80
     cw = (W - mx * 2 - gap) // 2
     lx, rx = mx, mx + cw + gap
@@ -462,19 +463,21 @@ def _render(out, W, H, compact=False):
 
     # ── RIGHT: Weather ──────────────────────────────────
     ry = top
-    _frame(d, rx, ry, cw, 170, "WEATHER", f16)
+    _frame(d, rx, ry, cw, 190, "WEATHER", f16)
     if weather:
         ay = ry + 30
         for line in _wmo_art(weather["code"]):
             d.text((rx + pad, ay), line, font=f16, fill=MID)
             ay += 22
-        d.text((rx + 230, ry + 40), f"{weather['temp']}F", font=f32, fill=WHITE)
-        d.text((rx + 232, ry + 88), weather["desc"], font=f16, fill=BRIGHT)
+        d.text((rx + 230, ry + 36), f"{weather['temp']}F", font=f32, fill=WHITE)
+        d.text((rx + 232, ry + 82), weather["desc"], font=f16, fill=BRIGHT)
+        feels = weather.get("feels", weather["temp"])
+        d.text((rx + 232, ry + 108), f"feels {feels}F", font=f14, fill=DIM)
     else:
         d.text((rx + pad, ry + 60), "no data", font=f16, fill=DIM)
 
     # ── RIGHT: Network ──────────────────────────────────
-    ry += 200
+    ry += 220
     _frame(d, rx, ry, cw, 130, "NETWORK", f16)
     iy = ry + 32
     d.text((rx + pad, iy), "up:", font=f14, fill=DIM)
@@ -497,6 +500,17 @@ def _render(out, W, H, compact=False):
         c = BRIGHT if cp > 2 else MID
         d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
         iy += 20
+
+    # ── TIME & DATE (bottom-right, above stamp) ────────
+    time_str = now.strftime("%H:%M")
+    date_str = now.strftime("%a  %b %d")
+    f28 = _font(28, bold=True)
+    tw_time = d.textlength(time_str, font=f28)
+    tw_date = d.textlength(date_str, font=f14)
+    time_x = W - mx - int(max(tw_time, tw_date))
+    time_y = H - TASKBAR_H - 70
+    d.text((time_x, time_y), time_str, font=f28, fill=BRIGHT)
+    d.text((time_x, time_y + 36), date_str, font=f14, fill=DIM)
 
     # ── DECORATIONS ─────────────────────────────────────
     ac = (34, 34, 34)
@@ -589,8 +603,16 @@ def _disable_fade():
     try:
         import winreg
         k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE)
+        # Disable wallpaper transition animation
         winreg.SetValueEx(k, "WallpaperTransitionMode", 0, winreg.REG_DWORD, 0)
+        # Set fill mode and disable slideshow
+        winreg.SetValueEx(k, "WallpaperStyle", 0, winreg.REG_SZ, "10")
+        winreg.SetValueEx(k, "TileWallpaper", 0, winreg.REG_SZ, "0")
         winreg.CloseKey(k)
+        # Also disable transition effects via DWM
+        k2 = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize", 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(k2, "EnableTransparentGlass", 0, winreg.REG_DWORD, 1)
+        winreg.CloseKey(k2)
     except Exception:
         pass
 
@@ -630,14 +652,19 @@ def main():
     _log("started")
 
     W, H = _screen()
+
+    # Generate solid black lockscreen once
+    lock_img = Image.new("RGB", (W, H), BG)
+    lock_img.save(lock)
+    _apply_lock(lock)
+    _log("lockscreen set")
+
     while True:
         try:
             _collect()
-            _render(wall, W, H, compact=False)
-            _render(lock, W, H, compact=True)
+            _render(wall, W, H)
             _hide_overlay()
             _apply_wall(wall)
-            _apply_lock(lock)
             _hide_overlay()
             _log("ok")
         except Exception as e:

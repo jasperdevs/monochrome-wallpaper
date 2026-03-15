@@ -38,10 +38,12 @@ BAR_BG = (30, 30, 30)
 ACCENT = (100, 100, 100)
 
 CPU_HISTORY = []
+NET_HISTORY = []
 NET_STATE = {"sent": None, "recv": None, "time": None}
 PROC_STATE = {}
 WEATHER_CACHE = {"data": None, "time": 0}
 STATIC_INFO = {}
+SNAPSHOT = {}  # collected once per tick, rendered twice
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
@@ -394,18 +396,16 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
     lx = margin_x
     rx = margin_x + col_w + col_gap
 
-    # Get metrics ONLY ONCE PER INTERVAL
-    cpu_pct = psutil.cpu_percent(interval=0) # 0 interval so it doesn't block the loop
-    if len(CPU_HISTORY) == 0 or cpu_pct > 0: # Ensure valid history
-        CPU_HISTORY.append(cpu_pct)
-    if len(CPU_HISTORY) > 60:
-        CPU_HISTORY.pop(0)
-
-    ram = psutil.virtual_memory()
-    disk = psutil.disk_usage("C:/")
-    sent_total, recv_total = update_net_rates()
-    procs = update_process_state()
-    weather = get_weather()
+    # Use pre-collected snapshot (collected once per tick)
+    cpu_pct = SNAPSHOT.get("cpu_pct", 0)
+    cpu_history = SNAPSHOT.get("cpu_history", [])
+    ram = SNAPSHOT.get("ram", psutil.virtual_memory())
+    disk = SNAPSHOT.get("disk", psutil.disk_usage("C:/"))
+    sent_total = SNAPSHOT.get("sent_total", 0)
+    recv_total = SNAPSHOT.get("recv_total", 0)
+    net_deltas = SNAPSHOT.get("net_deltas", [])
+    procs = SNAPSHOT.get("procs", [])
+    weather = SNAPSHOT.get("weather", None)
 
     # ════════════════════════════════════════════════════
     # LEFT COLUMN (HARDWARE)
@@ -419,7 +419,7 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
     iy += 34
     draw_bar(draw, lx + 24, iy, col_w - 48, cpu_pct)
     iy += 26
-    draw_sparkline(draw, lx + 24, iy, CPU_HISTORY, col_w - 48, 42)
+    draw_sparkline(draw, lx + 24, iy, cpu_history, col_w - 48, 42)
     iy += 60
     draw.text((lx + 24, iy), "gpu:", font=f14, fill=DIM)
     draw.text((lx + 74, iy), get_gpu_name(), font=f14, fill=MID)
@@ -474,16 +474,6 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
     draw.text((rx + col_w // 2 + 70, iy), fmt_bytes(recv_total), font=f18, fill=WHITE)
     
     iy += 45
-    # Calculate simple network load proxy to draw a graph
-    load_val = psutil.net_io_counters().bytes_sent + psutil.net_io_counters().bytes_recv
-    if "net_history" not in STATIC_INFO:
-        STATIC_INFO["net_history"] = []
-    STATIC_INFO["net_history"].append(load_val)
-    if len(STATIC_INFO["net_history"]) > 60:
-        STATIC_INFO["net_history"].pop(0)
-        
-    # Convert cumulative to relative for the graph
-    net_deltas = [max(0, STATIC_INFO["net_history"][i] - STATIC_INFO["net_history"][i-1]) for i in range(1, len(STATIC_INFO["net_history"]))]
     if len(net_deltas) > 1:
         draw_sparkline(draw, rx + 24, iy, net_deltas, col_w - 48, 42)
 
@@ -512,10 +502,38 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
     return output_path
 
 
+def collect_snapshot():
+    """Collect all live data ONCE per tick. Render uses this snapshot."""
+    cpu_pct = psutil.cpu_percent(interval=0)
+    CPU_HISTORY.append(cpu_pct)
+    if len(CPU_HISTORY) > 60:
+        CPU_HISTORY.pop(0)
+
+    sent_total, recv_total = update_net_rates()
+    NET_HISTORY.append(sent_total + recv_total)
+    if len(NET_HISTORY) > 60:
+        NET_HISTORY.pop(0)
+
+    SNAPSHOT["cpu_pct"] = cpu_pct
+    SNAPSHOT["cpu_history"] = list(CPU_HISTORY)
+    SNAPSHOT["ram"] = psutil.virtual_memory()
+    SNAPSHOT["disk"] = psutil.disk_usage("C:/")
+    SNAPSHOT["sent_total"] = sent_total
+    SNAPSHOT["recv_total"] = recv_total
+    SNAPSHOT["net_deltas"] = [
+        max(0, NET_HISTORY[i] - NET_HISTORY[i - 1])
+        for i in range(1, len(NET_HISTORY))
+    ]
+    SNAPSHOT["procs"] = update_process_state()
+    SNAPSHOT["weather"] = get_weather()
+    SNAPSHOT["now"] = datetime.now()
+
+
 def generate_assets(project_dir: Path):
     wall_path = project_dir / "wallpaper.bmp"
     lock_path = project_dir / "lockscreen.bmp"
     width, height = get_screen_size()
+    collect_snapshot()
     generate_wallpaper_image(wall_path, width, height, compact=False)
     generate_wallpaper_image(lock_path, width, height, compact=True)
     return wall_path, lock_path

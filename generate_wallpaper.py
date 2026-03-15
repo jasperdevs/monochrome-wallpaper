@@ -499,39 +499,34 @@ def _render(out, W, H, compact=False):
         iy += 20
 
     # ── DECORATIONS ─────────────────────────────────────
-    ac = (32, 32, 32)
+    ac = (34, 34, 34)
 
-    # top-left: hex addresses
-    for i in range(4):
-        addr = f"0x{0xC000 + i * 0x40:04X}"
-        d.text((mx, 50 + i * 16), addr, font=f12, fill=ac)
+    # top-left: subtle corner bracket
+    d.line((mx, 40, mx + 60, 40), fill=ac, width=1)
+    d.line((mx, 40, mx, 100), fill=ac, width=1)
 
-    # top-right: signal bars
-    for i in range(8):
-        bh = 4 + i * 3
-        bx = W - mx - (8 - i) * 10
-        by = 80 - bh
-        d.rectangle((bx, by, bx + 6, 80), fill=ac)
+    # top-right: matching corner bracket
+    d.line((W - mx - 60, 40, W - mx, 40), fill=ac, width=1)
+    d.line((W - mx, 40, W - mx, 100), fill=ac, width=1)
 
-    # bottom-left: hex dump
-    bot = H - TASKBAR_H - 60
-    for i in range(3):
-        row = " ".join(f"{(0xDE + i * 8 + j) & 0xFF:02X}" for j in range(8))
-        d.text((mx, bot + i * 16), row, font=f12, fill=ac)
+    # bottom-left: corner bracket
+    bot = H - TASKBAR_H - 20
+    d.line((mx, bot - 60, mx, bot), fill=ac, width=1)
+    d.line((mx, bot, mx + 60, bot), fill=ac, width=1)
 
-    # bottom-right: uptime pulse
-    pulse_y = bot + 8
-    pulse_w = 180
-    px = W - mx - pulse_w
-    for i in range(pulse_w):
-        import math
-        h_val = int(8 * abs(math.sin(i * 0.08)))
-        d.line((px + i, pulse_y - h_val, px + i, pulse_y + h_val), fill=ac)
+    # bottom-right: corner bracket
+    d.line((W - mx, bot - 60, W - mx, bot), fill=ac, width=1)
+    d.line((W - mx - 60, bot, W - mx, bot), fill=ac, width=1)
 
-    # center pipe
+    # thin horizontal rule above the bottom stamp
+    rule_y = H - TASKBAR_H - 8
+    for i in range(0, W - mx * 2, 6):
+        d.point((mx + i, rule_y), fill=ac)
+
+    # center dotted line between columns
     pipe_x = lx + cw + gap // 2
-    for yp in range(top, top + 500, 24):
-        d.rectangle((pipe_x, yp, pipe_x + 1, yp + 12), fill=ac)
+    for yp in range(top + 10, top + 510, 8):
+        d.point((pipe_x, yp), fill=ac)
 
     # ── BOTTOM STAMP ────────────────────────────────────
     stamp = f"updated {now.strftime('%H:%M:%S')}  |  {INTERVAL}s"
@@ -548,18 +543,15 @@ def _apply_wall(p):
 
 def _apply_lock(bmp):
     try:
-        import winreg
         jpg = bmp.with_suffix(".jpg")
         Image.open(bmp).save(jpg, "JPEG", quality=95)
-        k = winreg.CreateKeyEx(
-            winreg.HKEY_CURRENT_USER,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP",
-            0, winreg.KEY_SET_VALUE,
-        )
-        winreg.SetValueEx(k, "LockScreenImagePath", 0, winreg.REG_SZ, str(jpg))
-        winreg.SetValueEx(k, "LockScreenImageUrl", 0, winreg.REG_SZ, str(jpg))
-        winreg.SetValueEx(k, "LockScreenImageStatus", 0, winreg.REG_DWORD, 1)
-        winreg.CloseKey(k)
+        ps1 = bmp.parent / "set_lockscreen.ps1"
+        if ps1.exists():
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", str(ps1), str(jpg)],
+                capture_output=True, timeout=20, creationflags=NO_WIN,
+            )
     except Exception:
         pass
 

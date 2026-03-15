@@ -338,23 +338,23 @@ def hide_desktop_overlay():
     return hidden_any
 
 
-def try_set_lock_screen(path: Path):
-    ps_script = (
-        "Add-Type -AssemblyName System.Runtime.WindowsRuntime; "
-        "$f=[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]::GetFileFromPathAsync('"
-        + str(path).replace("\\", "\\\\")
-        + "').GetAwaiter().GetResult(); "
-        "[Windows.System.UserProfile.LockScreen,Windows.System.UserProfile,ContentType=WindowsRuntime]::SetImageFileAsync($f).GetAwaiter().GetResult()"
-    )
+def try_set_lock_screen(bmp_path: Path):
+    """Set lock screen via registry PersonalizationCSP key."""
     try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            creationflags=NO_WINDOW,
+        import winreg
+        jpg_path = bmp_path.with_suffix(".jpg")
+        Image.open(bmp_path).save(jpg_path, "JPEG", quality=95)
+        key = winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP",
+            0,
+            winreg.KEY_SET_VALUE,
         )
-        return result.returncode == 0
+        winreg.SetValueEx(key, "LockScreenImagePath", 0, winreg.REG_SZ, str(jpg_path))
+        winreg.SetValueEx(key, "LockScreenImageUrl", 0, winreg.REG_SZ, str(jpg_path))
+        winreg.SetValueEx(key, "LockScreenImageStatus", 0, winreg.REG_DWORD, 1)
+        winreg.CloseKey(key)
+        return True
     except Exception:
         return False
 
@@ -501,6 +501,61 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
         iy += 24
 
     # ════════════════════════════════════════════════════
+    # ASCII ART DECORATIONS
+    # ════════════════════════════════════════════════════
+    f12 = load_font(12)
+    art_color = (38, 38, 38)  # Very subtle, just above background
+
+    # Top-left corner circuit pattern
+    circuit_top = [
+        "  .-------.        .---.",
+        "  |       |---+----|   |",
+        "  '-------'   |    '---'",
+        "       .------+------. ",
+        "       |      |      | ",
+        "       '------+------' ",
+    ]
+    for i, line in enumerate(circuit_top):
+        draw.text((margin_x, 40 + i * 16), line, font=f12, fill=art_color)
+
+    # Top-right corner signal wave
+    signal = [
+        "        .  .        ",
+        "       / \\/ \\       ",
+        "  ----'    '----    ",
+        "                    ",
+    ]
+    for i, line in enumerate(signal):
+        sw = draw.textlength(line, font=f12)
+        draw.text((width - margin_x - int(sw), 50 + i * 16), line, font=f12, fill=art_color)
+
+    # Bottom-left data stream
+    stream = [
+        "  01001110 01101111",
+        "  01100100 01100101",
+        "  00101110 01101010",
+    ]
+    bot_art_y = height - TASKBAR_CLEARANCE - 70
+    for i, line in enumerate(stream):
+        draw.text((margin_x, bot_art_y + i * 16), line, font=f12, fill=art_color)
+
+    # Bottom-right matrix drip
+    drip = [
+        "  |  :  |  :  |  :",
+        "  :  |  :  |  :  |",
+        "  |  :  |  :  |  :",
+    ]
+    for i, line in enumerate(drip):
+        dw = draw.textlength(line, font=f12)
+        draw.text((width - margin_x - int(dw), bot_art_y + i * 16), line, font=f12, fill=art_color)
+
+    # Center gap between columns — vertical data pipe
+    pipe_x = lx + col_w + col_gap // 2 - 4
+    for y_pos in range(margin_top + 20, margin_top + 520, 18):
+        char = "|" if (y_pos // 18) % 3 != 0 else ":"
+        draw.text((pipe_x, y_pos), char, font=f12, fill=art_color)
+
+    # ════════════════════════════════════════════════════
     # BOTTOM
     # ════════════════════════════════════════════════════
     stamp = f"updated {now.strftime('%H:%M:%S')}  |  interval {INTERVAL}s"
@@ -575,15 +630,13 @@ def main():
     install_runtime(project_dir)
     threading.Thread(target=overlay_suppression_loop, daemon=True).start()
 
-    lockscreen_applied = False
     while True:
         try:
             wall_path, lock_path = generate_assets(project_dir)
             hide_desktop_overlay()
             apply_wallpaper(wall_path)
             hide_desktop_overlay()
-            if not lockscreen_applied:
-                lockscreen_applied = try_set_lock_screen(lock_path)
+            try_set_lock_screen(lock_path)
         except Exception:
             pass
         time.sleep(INTERVAL)

@@ -8,10 +8,11 @@ from pathlib import Path
 
 import psutil
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
+from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QSpinBox, QGroupBox, QFrame,
+    QLabel, QPushButton, QSpinBox, QGroupBox, QCheckBox, QFrame,
+    QFormLayout
 )
 
 PROJ = Path(__file__).parent
@@ -37,6 +38,7 @@ def start_wallpaper():
     subprocess.Popen(
         [PYTHONW, str(SCRIPT)],
         cwd=str(PROJ),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
 
 
@@ -51,162 +53,188 @@ def stop_wallpaper():
             pass
 
 
-def get_interval():
+def get_config():
+    config = {
+        "interval": 15,
+        "disable_fade": True,
+        "show_time": True
+    }
     try:
         text = SCRIPT.read_text(encoding="utf-8")
         for line in text.splitlines():
-            if line.startswith("INTERVAL"):
-                return int(line.split("=")[1].strip())
+            line = line.strip()
+            if line.startswith("INTERVAL ="):
+                config["interval"] = int(line.split("=")[1].strip())
+            elif line.startswith("DISABLE_FADE ="):
+                config["disable_fade"] = line.split("=")[1].strip() == "True"
+            elif line.startswith("SHOW_TIME ="):
+                config["show_time"] = line.split("=")[1].strip() == "True"
     except Exception:
         pass
-    return 15
+    return config
 
 
-def set_interval(val):
+def save_config(config):
     try:
         text = SCRIPT.read_text(encoding="utf-8")
         lines = text.splitlines()
         for i, line in enumerate(lines):
-            if line.startswith("INTERVAL"):
-                lines[i] = f"INTERVAL = {val}"
-                break
+            l = line.strip()
+            if l.startswith("INTERVAL ="):
+                lines[i] = f"INTERVAL = {config['interval']}"
+            elif l.startswith("DISABLE_FADE ="):
+                lines[i] = f"DISABLE_FADE = {config['disable_fade']}"
+            elif l.startswith("SHOW_TIME ="):
+                lines[i] = f"SHOW_TIME = {config['show_time']}"
         SCRIPT.write_text("\n".join(lines), encoding="utf-8")
-        # Restart if running
+        
         if is_running():
             stop_wallpaper()
             import time
             time.sleep(1)
             start_wallpaper()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error saving config: {e}")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("monochrome-wallpaper")
-        self.setFixedSize(420, 340)
+        self.setWindowTitle("Monochrome Wallpaper Settings")
+        self.setFixedSize(400, 480)
         self._apply_theme()
+
+        self.cfg = get_config()
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 30, 30, 30)
 
-        # Title
-        title = QLabel("monochrome-wallpaper")
-        title.setFont(QFont("Cascadia Mono", 16, QFont.Weight.Bold))
-        title.setStyleSheet("color: #e0e0e0;")
-        layout.addWidget(title)
+        # Header
+        header_layout = QHBoxLayout()
+        title = QLabel("Monochrome")
+        title.setFont(QFont("Cascadia Mono", 20, QFont.Weight.Bold))
+        title.setStyleSheet("color: #ffffff;")
+        
+        self.status_dot = QLabel("●")
+        self.status_dot.setFont(QFont("Arial", 16))
+        
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        header_layout.addWidget(self.status_dot)
+        layout.addLayout(header_layout)
 
-        subtitle = QLabel("live system dashboard wallpaper")
+        subtitle = QLabel("Live system dashboard wallpaper")
         subtitle.setFont(QFont("Cascadia Mono", 10))
-        subtitle.setStyleSheet("color: #888;")
+        subtitle.setStyleSheet("color: #888888;")
         layout.addWidget(subtitle)
 
-        layout.addSpacing(8)
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background-color: #333333;")
+        layout.addWidget(sep)
 
-        # Status
-        status_group = QGroupBox("Status")
-        status_group.setFont(QFont("Cascadia Mono", 10))
-        status_layout = QHBoxLayout(status_group)
-
-        self.status_label = QLabel("checking...")
-        self.status_label.setFont(QFont("Cascadia Mono", 11))
-        status_layout.addWidget(self.status_label)
-
-        status_layout.addStretch()
-
-        self.toggle_btn = QPushButton("Start")
-        self.toggle_btn.setFixedWidth(100)
-        self.toggle_btn.setFont(QFont("Cascadia Mono", 10))
-        self.toggle_btn.clicked.connect(self._toggle)
-        status_layout.addWidget(self.toggle_btn)
-
-        layout.addWidget(status_group)
-
-        # Interval
-        interval_group = QGroupBox("Refresh Interval")
-        interval_group.setFont(QFont("Cascadia Mono", 10))
-        interval_layout = QHBoxLayout(interval_group)
+        # Settings
+        form_layout = QFormLayout()
+        form_layout.setSpacing(15)
 
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 300)
-        self.interval_spin.setSuffix("s")
-        self.interval_spin.setValue(get_interval())
-        self.interval_spin.setFont(QFont("Cascadia Mono", 11))
+        self.interval_spin.setSuffix(" sec")
+        self.interval_spin.setValue(self.cfg["interval"])
+        self.interval_spin.setFont(QFont("Cascadia Mono", 10))
         self.interval_spin.setFixedWidth(100)
-        interval_layout.addWidget(self.interval_spin)
+        
+        int_label = QLabel("Refresh Interval:")
+        int_label.setFont(QFont("Cascadia Mono", 10))
+        form_layout.addRow(int_label, self.interval_spin)
 
-        apply_btn = QPushButton("Apply")
-        apply_btn.setFixedWidth(80)
-        apply_btn.setFont(QFont("Cascadia Mono", 10))
-        apply_btn.clicked.connect(self._apply_interval)
-        interval_layout.addWidget(apply_btn)
+        self.fade_check = QCheckBox("Disable Windows Wallpaper Fade")
+        self.fade_check.setFont(QFont("Cascadia Mono", 10))
+        self.fade_check.setChecked(self.cfg["disable_fade"])
+        form_layout.addRow("", self.fade_check)
 
-        interval_layout.addStretch()
-        layout.addWidget(interval_group)
+        self.time_check = QCheckBox("Show Time & Date")
+        self.time_check.setFont(QFont("Cascadia Mono", 10))
+        self.time_check.setChecked(self.cfg["show_time"])
+        form_layout.addRow("", self.time_check)
+
+        layout.addLayout(form_layout)
 
         layout.addStretch()
 
-        # Footer
-        footer = QLabel("github.com/jasprcodess/monochrome-wallpaper")
-        footer.setFont(QFont("Cascadia Mono", 9))
-        footer.setStyleSheet("color: #555;")
-        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(footer)
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
 
-        # Timer to refresh status
+        self.toggle_btn = QPushButton("Start Wallpaper")
+        self.toggle_btn.setFont(QFont("Cascadia Mono", 11, QFont.Weight.Bold))
+        self.toggle_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.toggle_btn.clicked.connect(self._toggle)
+        btn_layout.addWidget(self.toggle_btn)
+
+        self.apply_btn = QPushButton("Apply Settings")
+        self.apply_btn.setFont(QFont("Cascadia Mono", 11, QFont.Weight.Bold))
+        self.apply_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.apply_btn.clicked.connect(self._apply_settings)
+        btn_layout.addWidget(self.apply_btn)
+
+        layout.addLayout(btn_layout)
+
         self.timer = QTimer()
-        self.timer.timeout.connect(self._refresh)
-        self.timer.start(2000)
-        self._refresh()
+        self.timer.timeout.connect(self._refresh_status)
+        self.timer.start(1500)
+        self._refresh_status()
 
     def _apply_theme(self):
         self.setStyleSheet("""
-            QMainWindow { background-color: #161616; }
-            QGroupBox {
-                border: 1px solid #333;
+            QMainWindow { background-color: #121212; }
+            QLabel { color: #cccccc; }
+            QSpinBox {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                border: 1px solid #333333;
                 border-radius: 4px;
-                margin-top: 12px;
-                padding-top: 16px;
-                color: #aaa;
+                padding: 6px;
             }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
+            QSpinBox::up-button, QSpinBox::down-button { width: 0px; }
+            QCheckBox { color: #cccccc; }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                background-color: #1e1e1e;
+                border: 1px solid #333333;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #555555;
+                border: 1px solid #777777;
             }
             QPushButton {
-                background-color: #2a2a2a;
-                color: #ddd;
-                border: 1px solid #444;
-                border-radius: 3px;
-                padding: 6px 12px;
+                background-color: #222222;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 10px;
             }
-            QPushButton:hover { background-color: #333; }
-            QPushButton:pressed { background-color: #444; }
-            QSpinBox {
-                background-color: #222;
-                color: #ddd;
-                border: 1px solid #444;
-                border-radius: 3px;
-                padding: 4px 8px;
-            }
-            QLabel { color: #ccc; }
+            QPushButton:hover { background-color: #333333; border: 1px solid #555555; }
+            QPushButton:pressed { background-color: #111111; }
         """)
 
-    def _refresh(self):
-        running = is_running()
-        if running:
-            self.status_label.setText("running")
-            self.status_label.setStyleSheet("color: #8f8;")
+    def _refresh_status(self):
+        if is_running():
+            self.status_dot.setStyleSheet("color: #4CAF50;")
+            self.status_dot.setToolTip("Running")
             self.toggle_btn.setText("Stop")
+            self.toggle_btn.setStyleSheet("background-color: #3d1b1b; border-color: #5c2828; color: #ffb3b3;")
         else:
-            self.status_label.setText("stopped")
-            self.status_label.setStyleSheet("color: #f88;")
+            self.status_dot.setStyleSheet("color: #F44336;")
+            self.status_dot.setToolTip("Stopped")
             self.toggle_btn.setText("Start")
+            self.toggle_btn.setStyleSheet("")
 
     def _toggle(self):
         if is_running():
@@ -214,11 +242,16 @@ class MainWindow(QMainWindow):
         else:
             start_wallpaper()
         import time
-        time.sleep(1)
-        self._refresh()
+        time.sleep(0.5)
+        self._refresh_status()
 
-    def _apply_interval(self):
-        set_interval(self.interval_spin.value())
+    def _apply_settings(self):
+        self.cfg["interval"] = self.interval_spin.value()
+        self.cfg["disable_fade"] = self.fade_check.isChecked()
+        self.cfg["show_time"] = self.time_check.isChecked()
+        save_config(self.cfg)
+        self.apply_btn.setText("Applied!")
+        QTimer.singleShot(1500, lambda: self.apply_btn.setText("Apply Settings"))
 
 
 def main():

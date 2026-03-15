@@ -22,6 +22,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ── config ──────────────────────────────────────────────
 INTERVAL = 15
+DISABLE_FADE = True
+SHOW_TIME = True
 TASKBAR_H = 100
 FONTS_DIR = "C:/Windows/Fonts"
 FONT_REGULAR = "CascadiaMono.ttf"
@@ -502,15 +504,16 @@ def _render(out, W, H):
         iy += 20
 
     # ── TIME & DATE (bottom-right, above stamp) ────────
-    time_str = now.strftime("%H:%M")
-    date_str = now.strftime("%a  %b %d")
-    f28 = _font(28, bold=True)
-    tw_time = d.textlength(time_str, font=f28)
-    tw_date = d.textlength(date_str, font=f14)
-    time_x = W - mx - int(max(tw_time, tw_date))
-    time_y = H - TASKBAR_H - 70
-    d.text((time_x, time_y), time_str, font=f28, fill=BRIGHT)
-    d.text((time_x, time_y + 36), date_str, font=f14, fill=DIM)
+    if SHOW_TIME:
+        time_str = now.strftime("%H:%M")
+        date_str = now.strftime("%a  %b %d")
+        f28 = _font(28, bold=True)
+        tw_time = d.textlength(time_str, font=f28)
+        tw_date = d.textlength(date_str, font=f14)
+        time_x = W - mx - int(max(tw_time, tw_date))
+        time_y = H - TASKBAR_H - 70
+        d.text((time_x, time_y), time_str, font=f28, fill=BRIGHT)
+        d.text((time_x, time_y + 36), date_str, font=f14, fill=DIM)
 
     # ── DECORATIONS ─────────────────────────────────────
     ac = (34, 34, 34)
@@ -600,16 +603,15 @@ def _overlay_loop():
 
 
 def _disable_fade():
+    if not DISABLE_FADE:
+        return
     try:
         import winreg
         k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE)
-        # Disable wallpaper transition animation
         winreg.SetValueEx(k, "WallpaperTransitionMode", 0, winreg.REG_DWORD, 0)
-        # Set fill mode and disable slideshow
         winreg.SetValueEx(k, "WallpaperStyle", 0, winreg.REG_SZ, "10")
         winreg.SetValueEx(k, "TileWallpaper", 0, winreg.REG_SZ, "0")
         winreg.CloseKey(k)
-        # Also disable transition effects via DWM
         k2 = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize", 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(k2, "EnableTransparentGlass", 0, winreg.REG_DWORD, 1)
         winreg.CloseKey(k2)

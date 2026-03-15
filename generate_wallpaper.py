@@ -471,21 +471,21 @@ def _render(out, W, H):
 
     # ── RIGHT: Weather ──────────────────────────────────
     ry = top
-    _frame(d, rx, ry, cw, 160, "WEATHER", f16)
+    _frame(d, rx, ry, cw, 175, "WEATHER", f16)
     if weather:
-        ay = ry + 26
+        ay = ry + 25
         for line in _wmo_art(weather["code"]):
             d.text((rx + pad, ay), line, font=f16, fill=MID)
             ay += 20
-        d.text((rx + 230, ry + 36), f"{weather['temp']}F", font=f32, fill=WHITE)
-        d.text((rx + 232, ry + 82), weather["desc"], font=f16, fill=BRIGHT)
+        d.text((rx + 220, ry + 45), f"{weather['temp']}F", font=f32, fill=WHITE)
+        d.text((rx + 222, ry + 95), weather["desc"], font=f16, fill=BRIGHT)
         feels = weather.get("feels", weather["temp"])
-        d.text((rx + 232, ry + 108), f"feels {feels}F", font=f14, fill=DIM)
+        d.text((rx + 222, ry + 120), f"feels {feels}F", font=f14, fill=DIM)
     else:
         d.text((rx + pad, ry + 60), "no data", font=f16, fill=DIM)
 
     # ── RIGHT: Network ──────────────────────────────────
-    ry += 190  # 160 (weather) + 30 (gap)
+    ry += 205  # 175 + 30 gap
     _frame(d, rx, ry, cw, 125, "NETWORK", f16)
     iy = ry + 32
     d.text((rx + pad, iy), "up:", font=f14, fill=DIM)
@@ -497,14 +497,14 @@ def _render(out, W, H):
     _spark(d, rx + pad, iy, net_d, inner, 35)
 
     # ── RIGHT: Processes ────────────────────────────────
-    ry += 155  # 125 (network) + 30 (gap)
-    _frame(d, rx, ry, cw, 135, "PROCESSES", f16)
+    ry += 155  # 125 + 30 gap
+    _frame(d, rx, ry, cw, 120, "PROCESSES", f16)
     iy = ry + 28
     d.text((rx + pad, iy), f"{'NAME':<22}{'CPU':>7} {'MEM':>7}", font=f12, fill=DIM)
     iy += 22
     if not procs:
         d.text((rx + pad, iy), "sampling...", font=f12, fill=DIM)
-    for name, cp, mm in procs[:4]: # only show 4 to fit exact height
+    for name, cp, mm in procs[:3]:  # Reduced to 3 to fit exact total height of 480
         c = BRIGHT if cp > 2 else MID
         d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
         iy += 18

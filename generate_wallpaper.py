@@ -419,7 +419,11 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
     iy += 34
     draw_bar(draw, lx + 24, iy, col_w - 48, cpu_pct)
     iy += 26
-    draw_sparkline(draw, lx + 24, iy, cpu_history, col_w - 48, 42)
+    cpu_graph_x = lx + 24
+    cpu_graph_w = col_w - 48
+    cpu_graph_h = 42
+    draw.rectangle((cpu_graph_x, iy, cpu_graph_x + cpu_graph_w, iy + cpu_graph_h), fill=BAR_BG)
+    draw_sparkline(draw, cpu_graph_x, iy, cpu_history, cpu_graph_w, cpu_graph_h)
     iy += 60
     draw.text((lx + 24, iy), "gpu:", font=f14, fill=DIM)
     draw.text((lx + 74, iy), get_gpu_name(), font=f14, fill=MID)
@@ -474,8 +478,13 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
     draw.text((rx + col_w // 2 + 70, iy), fmt_bytes(recv_total), font=f18, fill=WHITE)
     
     iy += 45
+    graph_x = rx + 24
+    graph_w = col_w - 48
+    graph_h = 42
+    # Always draw the graph area background so it's never empty
+    draw.rectangle((graph_x, iy, graph_x + graph_w, iy + graph_h), fill=BAR_BG)
     if len(net_deltas) > 1:
-        draw_sparkline(draw, rx + 24, iy, net_deltas, col_w - 48, 42)
+        draw_sparkline(draw, graph_x, iy, net_deltas, graph_w, graph_h)
 
     # TOP PROCESSES
     ry += 170
@@ -539,8 +548,25 @@ def generate_assets(project_dir: Path):
     return wall_path, lock_path
 
 
+def disable_wallpaper_fade():
+    """Disable the Windows wallpaper crossfade transition."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Control Panel\Desktop",
+            0,
+            winreg.KEY_SET_VALUE,
+        )
+        winreg.SetValueEx(key, "WallpaperTransitionMode", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
 def install_runtime(project_dir: Path):
     write_startup_launcher(project_dir)
+    disable_wallpaper_fade()
 
 
 def main():

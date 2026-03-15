@@ -23,7 +23,6 @@ from PIL import Image, ImageDraw, ImageFont
 # ── config ──────────────────────────────────────────────
 INTERVAL = 15
 DISABLE_FADE = True
-SHOW_TIME = True
 TASKBAR_H = 100
 FONTS_DIR = "C:/Windows/Fonts"
 FONT_REGULAR = "CascadiaMono.ttf"

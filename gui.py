@@ -9,7 +9,7 @@ from pathlib import Path
 import psutil
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon, QFont
+from PyQt6.QtGui import QIcon, QFont, QColor
 from PyQt6.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget
 from qfluentwidgets import (
     setTheme, Theme, FluentWindow, NavigationItemPosition,

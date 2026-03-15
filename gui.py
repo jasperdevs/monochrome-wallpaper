@@ -1,22 +1,24 @@
 """
 monochrome-wallpaper settings GUI
-Modern Windows 11 Fluent-style UI using PyQt6-Fluent-Widgets.
+Clean, single-page, native Windows 11 Fluent interface.
 """
-
-import subprocess
 import sys
+import subprocess
+import time
 from pathlib import Path
 import psutil
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon, QFont, QColor
-from PyQt6.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget, QFrame
 from qfluentwidgets import (
-    setTheme, Theme, FluentWindow, NavigationItemPosition,
+    setTheme, Theme, setThemeColor,
     SubtitleLabel, BodyLabel, SpinBox, SwitchButton, PrimaryPushButton,
     CardWidget, VBoxLayout, StrongBodyLabel, InfoBar, InfoBarPosition,
-    ScrollArea, ExpandLayout
+    ScrollArea, ComboBox, PushButton, FluentWindow, NavigationItemPosition
 )
+
+from config_manager import load_config, save_config
 
 PROJ = Path(__file__).parent
 SCRIPT = PROJ / "generate_wallpaper.py"
@@ -32,10 +34,9 @@ def is_running():
             if "generate_wallpaper.py" in cmd and "python" in (p.info.get("name") or "").lower():
                 if "gui.py" not in cmd:
                     return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except:
             pass
     return False
-
 
 def start_wallpaper():
     subprocess.Popen(
@@ -44,7 +45,6 @@ def start_wallpaper():
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
 
-
 def stop_wallpaper():
     for p in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
@@ -52,139 +52,153 @@ def stop_wallpaper():
             if "generate_wallpaper.py" in cmd and "python" in (p.info.get("name") or "").lower():
                 if "gui.py" not in cmd:
                     p.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except:
             pass
 
 
-def get_config():
-    config = {
-        "interval": 15,
-        "disable_fade": True
-    }
-    try:
-        text = SCRIPT.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("INTERVAL ="):
-                config["interval"] = int(line.split("=")[1].strip())
-            elif line.startswith("DISABLE_FADE ="):
-                config["disable_fade"] = line.split("=")[1].strip() == "True"
-    except Exception:
-        pass
-    return config
-
-
-def save_config(config):
-    try:
-        text = SCRIPT.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            l = line.strip()
-            if l.startswith("INTERVAL ="):
-                lines[i] = f"INTERVAL = {config['interval']}"
-            elif l.startswith("DISABLE_FADE ="):
-                lines[i] = f"DISABLE_FADE = {config['disable_fade']}"
-        SCRIPT.write_text("\n".join(lines), encoding="utf-8")
-        
-        if is_running():
-            stop_wallpaper()
-            import time
-            time.sleep(1)
-            start_wallpaper()
-        return True
-    except Exception as e:
-        print(f"Error saving config: {e}")
-        return False
-
-
 class SettingsInterface(ScrollArea):
-    def __init__(self, parent=None):
+    def __init__(self, cfg, parent=None):
         super().__init__(parent=parent)
+        self.cfg = cfg
         self.view = QWidget(self)
         self.layout = VBoxLayout(self.view)
         
         self.setWidget(self.view)
         self.setWidgetResizable(True)
         self.setObjectName("settingsInterface")
-        
         self.view.setObjectName("view")
-        self.layout.setContentsMargins(30, 20, 30, 20)
-        self.layout.setSpacing(20)
-
-        self.cfg = get_config()
-
-        # Title
-        self.titleLabel = SubtitleLabel("Monochrome Wallpaper Settings", self.view)
-        self.layout.addWidget(self.titleLabel)
-
-        # Status Card
-        self.statusCard = CardWidget(self.view)
-        status_layout = QHBoxLayout(self.statusCard)
-        status_layout.setContentsMargins(20, 16, 20, 16)
         
-        self.status_title = StrongBodyLabel("Service Status", self.statusCard)
-        self.status_desc = BodyLabel("Checking...", self.statusCard)
-        self.status_desc.setTextColor(QColor(150, 150, 150), QColor(150, 150, 150))
+        self.layout.setContentsMargins(36, 24, 36, 24)
+        self.layout.setSpacing(24)
+
+        # Huge title like Windows 11 Settings
+        title = SubtitleLabel("Dashboard Settings", self.view)
+        self.layout.addWidget(title)
+
+        # --- STATUS CARD ---
+        self.statusCard = CardWidget(self.view)
+        sl = QHBoxLayout(self.statusCard)
+        sl.setContentsMargins(20, 20, 20, 20)
         
         text_layout = QVBoxLayout()
-        text_layout.addWidget(self.status_title)
+        text_layout.addWidget(StrongBodyLabel("Service Status", self.statusCard))
+        self.status_desc = BodyLabel("Checking...", self.statusCard)
         text_layout.addWidget(self.status_desc)
-        status_layout.addLayout(text_layout)
+        sl.addLayout(text_layout)
+        sl.addStretch()
         
-        status_layout.addStretch()
-        
-        self.toggle_btn = PrimaryPushButton("Start", self.statusCard)
+        self.toggle_btn = PushButton("Start", self.statusCard)
         self.toggle_btn.clicked.connect(self._toggle)
-        status_layout.addWidget(self.toggle_btn)
-        
+        sl.addWidget(self.toggle_btn)
         self.layout.addWidget(self.statusCard)
 
-        # Settings Card
-        self.settingsCard = CardWidget(self.view)
-        settings_layout = QVBoxLayout(self.settingsCard)
-        settings_layout.setContentsMargins(20, 16, 20, 16)
-        settings_layout.setSpacing(16)
+        # --- BEHAVIOR CARD ---
+        self.layout.addWidget(StrongBodyLabel("System Behavior", self.view))
+        self.behaviorCard = CardWidget(self.view)
+        bl = QVBoxLayout(self.behaviorCard)
+        bl.setContentsMargins(20, 16, 20, 16)
+        bl.setSpacing(16)
 
-        # Interval
-        int_layout = QHBoxLayout()
-        int_title = StrongBodyLabel("Refresh Interval", self.settingsCard)
-        self.interval_spin = SpinBox(self.settingsCard)
+        il = QHBoxLayout()
+        il.addWidget(BodyLabel("Refresh Interval", self.behaviorCard))
+        il.addStretch()
+        self.interval_spin = SpinBox(self.behaviorCard)
         self.interval_spin.setRange(5, 300)
-        self.interval_spin.setValue(self.cfg["interval"])
+        self.interval_spin.setValue(self.cfg["behavior"]["interval"])
         self.interval_spin.setSuffix(" sec")
+        il.addWidget(self.interval_spin)
+        bl.addLayout(il)
+
+        sep1 = QFrame(self.behaviorCard)
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("background-color: #333333; border: none;")
+        sep1.setFixedHeight(1)
+        bl.addWidget(sep1)
+
+        fl = QHBoxLayout()
+        fl.addWidget(BodyLabel("Disable Windows crossfade animation", self.behaviorCard))
+        fl.addStretch()
+        self.fade_switch = SwitchButton(self.behaviorCard)
+        self.fade_switch.setChecked(self.cfg["behavior"]["disable_fade"])
+        fl.addWidget(self.fade_switch)
+        bl.addLayout(fl)
+
+        sep2 = QFrame(self.behaviorCard)
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("background-color: #333333; border: none;")
+        sep2.setFixedHeight(1)
+        bl.addWidget(sep2)
+
+        ll = QHBoxLayout()
+        ll.addWidget(BodyLabel("Enable solid-color lockscreen override", self.behaviorCard))
+        ll.addStretch()
+        self.lock_switch = SwitchButton(self.behaviorCard)
+        self.lock_switch.setChecked(self.cfg["behavior"].get("lockscreen_enabled", True))
+        ll.addWidget(self.lock_switch)
+        bl.addLayout(ll)
         
-        int_layout.addWidget(int_title)
-        int_layout.addStretch()
-        int_layout.addWidget(self.interval_spin)
-        settings_layout.addLayout(int_layout)
-
-        # Separator inside card
-        sep = QFrame(self.settingsCard)
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background-color: #333333; border: none;")
-        sep.setFixedHeight(1)
-        settings_layout.addWidget(sep)
-
-        # Fade Toggle
-        fade_layout = QHBoxLayout()
-        fade_title = StrongBodyLabel("Disable Windows Fade", self.settingsCard)
-        self.fade_switch = SwitchButton(self.settingsCard)
-        self.fade_switch.setChecked(self.cfg["disable_fade"])
+        sep3 = QFrame(self.behaviorCard)
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("background-color: #333333; border: none;")
+        sep3.setFixedHeight(1)
+        bl.addWidget(sep3)
         
-        fade_layout.addWidget(fade_title)
-        fade_layout.addStretch()
-        fade_layout.addWidget(self.fade_switch)
-        settings_layout.addLayout(fade_layout)
+        tf_layout = QHBoxLayout()
+        tf_layout.addWidget(BodyLabel("Time Format", self.behaviorCard))
+        tf_layout.addStretch()
+        self.time_combo = ComboBox(self.behaviorCard)
+        self.time_combo.addItems(["12-hour", "24-hour"])
+        self.time_combo.setCurrentText(self.cfg["behavior"].get("time_format", "12-hour"))
+        tf_layout.addWidget(self.time_combo)
+        bl.addLayout(tf_layout)
 
-        self.layout.addWidget(self.settingsCard)
+        self.layout.addWidget(self.behaviorCard)
 
-        # Apply Button
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.apply_btn = PrimaryPushButton("Apply Settings", self.view)
-        self.apply_btn.clicked.connect(self._apply_settings)
-        btn_layout.addWidget(self.apply_btn)
-        self.layout.addLayout(btn_layout)
+        # --- APPEARANCE CARD ---
+        self.layout.addWidget(StrongBodyLabel("Visual Configuration", self.view))
+        self.appearanceCard = CardWidget(self.view)
+        al = QVBoxLayout(self.appearanceCard)
+        al.setContentsMargins(20, 16, 20, 16)
+        al.setSpacing(16)
+
+        tl = QHBoxLayout()
+        tl.addWidget(BodyLabel("Color Theme", self.appearanceCard))
+        tl.addStretch()
+        self.theme_combo = ComboBox(self.appearanceCard)
+        self.theme_combo.addItems(list(self.cfg["themes"].keys()))
+        self.theme_combo.setCurrentText(self.cfg["theme"])
+        tl.addWidget(self.theme_combo)
+        al.addLayout(tl)
+
+        self.layout.addWidget(self.appearanceCard)
+
+        # --- MODULES CARD ---
+        self.layout.addWidget(StrongBodyLabel("Active Modules", self.view))
+        self.modulesCard = CardWidget(self.view)
+        ml = QVBoxLayout(self.modulesCard)
+        ml.setContentsMargins(20, 16, 20, 16)
+        ml.setSpacing(16)
+
+        self.mod_switches = {}
+        for i, (mod, val) in enumerate(self.cfg["modules"].items()):
+            row = QHBoxLayout()
+            row.addWidget(BodyLabel(mod.capitalize(), self.modulesCard))
+            row.addStretch()
+            sw = SwitchButton(self.modulesCard)
+            sw.setChecked(val)
+            self.mod_switches[mod] = sw
+            row.addWidget(sw)
+            ml.addLayout(row)
+            
+            # Don't add a separator after the last item
+            if i < len(self.cfg["modules"]) - 1:
+                sep = QFrame(self.modulesCard)
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setStyleSheet("background-color: #333333; border: none;")
+                sep.setFixedHeight(1)
+                ml.addWidget(sep)
+
+        self.layout.addWidget(self.modulesCard)
 
         self.layout.addStretch()
 
@@ -196,70 +210,85 @@ class SettingsInterface(ScrollArea):
     def _refresh_status(self):
         if is_running():
             self.status_desc.setText("Running securely in background")
-            self.status_desc.setStyleSheet("color: #60cdff;")
+            self.status_desc.setStyleSheet("color: #d0d0d0;")
             self.toggle_btn.setText("Stop")
-            # Style button as destructive/secondary when running
-            self.toggle_btn.setStyleSheet("background-color: #3d1b1b; border-color: #5c2828; color: #ffb3b3;")
         else:
-            self.status_desc.setText("Service is currently stopped")
-            self.status_desc.setStyleSheet("color: #ff99a4;")
+            self.status_desc.setText("Service is stopped")
+            self.status_desc.setStyleSheet("color: #9a9a9a;")
             self.toggle_btn.setText("Start")
-            self.toggle_btn.setStyleSheet("")
 
     def _toggle(self):
         if is_running():
             stop_wallpaper()
         else:
             start_wallpaper()
-        import time
         time.sleep(0.5)
         self._refresh_status()
 
-    def _apply_settings(self):
-        self.cfg["interval"] = self.interval_spin.value()
-        self.cfg["disable_fade"] = self.fade_switch.isChecked()
-        if save_config(self.cfg):
-            InfoBar.success(
-                title='Success',
-                content="Settings applied successfully.",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=2000,
-                parent=self
-            )
-        else:
-            InfoBar.error(
-                title='Error',
-                content="Failed to save settings.",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=2000,
-                parent=self
-            )
+    def update_cfg(self):
+        self.cfg["behavior"]["interval"] = self.interval_spin.value()
+        self.cfg["behavior"]["disable_fade"] = self.fade_switch.isChecked()
+        self.cfg["behavior"]["lockscreen_enabled"] = self.lock_switch.isChecked()
+        self.cfg["behavior"]["time_format"] = self.time_combo.currentText()
+        self.cfg["theme"] = self.theme_combo.currentText()
+        for mod, sw in self.mod_switches.items():
+            self.cfg["modules"][mod] = sw.isChecked()
 
 
 class Window(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Monochrome Settings")
-        self.resize(500, 480)
-
-        # create sub interface
-        self.settingsInterface = SettingsInterface(self)
+        self.setWindowTitle("Dashboard Settings")
+        self.resize(550, 650)
         
+        self.cfg = load_config()
+
+        # Hide the sidebar navigation entirely!
+        self.navigationInterface.hide()
+
+        self.settingsInterface = SettingsInterface(self.cfg, self)
+        
+        # In FluentWindow, if we don't want navigation, we just set the widget directly
+        # to the stacked widget area.
         self.addSubInterface(self.settingsInterface, None, "Settings")
         
-        # We don't need the navigation panel for just one page
-        self.navigationInterface.hide()
+        # Add Apply button floating at the bottom right
+        self.apply_btn = PrimaryPushButton("Apply Changes", self)
+        self.apply_btn.setFixedSize(140, 36)
+        self.apply_btn.move(self.width() - 170, self.height() - 60)
+        self.apply_btn.clicked.connect(self._apply_settings)
+        
+        # Handle resize to keep button docked
+        self.resizeEvent = self._on_resize
+
+    def _on_resize(self, event):
+        super().resizeEvent(event)
+        self.apply_btn.move(self.width() - 170, self.height() - 60)
+
+    def _apply_settings(self):
+        self.settingsInterface.update_cfg()
+        save_config(self.cfg)
+        
+        if is_running():
+            stop_wallpaper()
+            time.sleep(1)
+            start_wallpaper()
+
+        InfoBar.success(
+            title='Success',
+            content="Settings saved and applied instantly.",
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=2000,
+            parent=self
+        )
 
 
 def main():
     setTheme(Theme.DARK)
+    setThemeColor("#8a8a8a")
     app = QApplication(sys.argv)
-    
-    # Create window
     w = Window()
     w.show()
     sys.exit(app.exec())

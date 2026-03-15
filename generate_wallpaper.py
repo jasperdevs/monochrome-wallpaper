@@ -6,7 +6,6 @@ Auto-detects hardware, weather, and usage. No personal data rendered.
 
 import ctypes
 import ctypes.wintypes
-import json
 import os
 import platform
 import subprocess
@@ -20,24 +19,14 @@ from pathlib import Path
 import psutil
 from PIL import Image, ImageDraw, ImageFont
 
-# ── config ──────────────────────────────────────────────
-INTERVAL = 15
-DISABLE_FADE = True
-TASKBAR_H = 100
+from config_manager import load_config
+
+# ── setup ───────────────────────────────────────────────
+PROJ_DIR = Path(__file__).parent
 FONTS_DIR = "C:/Windows/Fonts"
 FONT_REGULAR = "CascadiaMono.ttf"
 FONT_BOLD = "CascadiaMonoNF-Bold.otf"
 FONT_FALLBACK = "consola.ttf"
-
-BG = (16, 16, 16)
-SUBTLE = (24, 24, 24)
-DIM = (75, 75, 75)
-MID = (140, 140, 140)
-BRIGHT = (210, 210, 210)
-WHITE = (240, 240, 240)
-BAR_BG = (28, 28, 28)
-BAR_FILL = (100, 100, 100)
-GRAPH_BAR = (90, 90, 90)
 
 # ── runtime state ───────────────────────────────────────
 _cpu_hist = []
@@ -45,13 +34,12 @@ _net_hist = []
 _net_prev = {"s": 0, "r": 0, "t": 0}
 _proc_prev = {"t": 0, "items": {}}
 _weather_cache = {"d": None, "t": 0}
+_speedtest_cache = {"d": None, "t": 0, "running": False}
 _static = {}
 _snap = {}
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-_EnumCB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
 
 
-# ── helpers ─────────────────────────────────────────────
 def _ps(cmd):
     try:
         r = subprocess.run(
@@ -96,7 +84,7 @@ def _screen():
         return 1920, 1080
 
 
-# ── static info (queried once) ──────────────────────────
+# ── static info ──────────────────────────
 def _cpu_name():
     if "cpu" in _static:
         return _static["cpu"]
@@ -108,7 +96,6 @@ def _cpu_name():
     _static["cpu"] = v
     return v
 
-
 def _gpu_name():
     if "gpu" in _static:
         return _static["gpu"]
@@ -119,7 +106,6 @@ def _gpu_name():
     _static["gpu"] = v
     return v
 
-
 def _os_name():
     if "os" in _static:
         return _static["os"]
@@ -127,12 +113,10 @@ def _os_name():
     _static["os"] = v
     return v
 
-
 def _ram_total():
     if "ramt" not in _static:
         _static["ramt"] = _fmt_stor(psutil.virtual_memory().total / (1024**3))
     return _static["ramt"]
-
 
 def _disk_total():
     if "diskt" not in _static:
@@ -145,14 +129,55 @@ def _uptime():
     d = int(time.time() - psutil.boot_time())
     return f"{d // 86400}d {(d % 86400) // 3600}h {(d % 3600) // 60}m"
 
-
 def _net():
     c = psutil.net_io_counters()
+    now = time.time()
+    if _net_prev["t"] == 0:
+        _net_prev["s"] = c.bytes_sent
+        _net_prev["r"] = c.bytes_recv
+        _net_prev["t"] = now
+        return 0.0, 0.0
+    dt = max(now - _net_prev["t"], 0.1)
+    up_rate = max(0.0, (c.bytes_sent - _net_prev["s"]) / dt)
+    down_rate = max(0.0, (c.bytes_recv - _net_prev["r"]) / dt)
     _net_prev["s"] = c.bytes_sent
     _net_prev["r"] = c.bytes_recv
-    _net_prev["t"] = time.time()
-    return c.bytes_sent, c.bytes_recv
+    _net_prev["t"] = now
+    return up_rate, down_rate
 
+def _run_speedtest_bg():
+    global _speedtest_cache
+    if _speedtest_cache["running"]:
+        return
+    _speedtest_cache["running"] = True
+    
+    def _do_test():
+        try:
+            import speedtest
+            st = speedtest.Speedtest()
+            st.get_best_server()
+            d = st.download() / 1_000_000 # Convert to Mbps
+            u = st.upload() / 1_000_000 # Convert to Mbps
+            
+            _speedtest_cache["d"] = {
+                "down": d,
+                "up": u,
+                "ping": st.results.ping,
+                "server": st.results.server.get('sponsor', 'Unknown')
+            }
+            _speedtest_cache["t"] = time.time()
+        except Exception:
+            pass
+        finally:
+            _speedtest_cache["running"] = False
+            
+    threading.Thread(target=_do_test, daemon=True).start()
+
+def _get_speedtest():
+    now = time.time()
+    if _speedtest_cache["d"] is None or (now - _speedtest_cache["t"] > 1800):
+        _run_speedtest_bg()
+    return _speedtest_cache["d"]
 
 def _procs():
     cur = {}
@@ -189,7 +214,7 @@ def _procs():
     rows.sort(key=lambda r: r[1], reverse=True)
     return rows[:5]
 
-
+import json
 # ── weather ─────────────────────────────────────────────
 WMO_DESC = {
     0: "clear sky", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
@@ -278,40 +303,26 @@ WMO_ART = {
     ],
 }
 
-
 def _wmo_art(code):
-    if code in (0, 1):
-        return WMO_ART["clear"]
-    if code == 2:
-        return WMO_ART["partly"]
-    if code == 3:
-        return WMO_ART["cloudy"]
-    if code in (45, 48):
-        return WMO_ART["fog"]
-    if code in (51, 53, 55, 56, 57):
-        return WMO_ART["drizzle"]
-    if code in (61, 63, 80, 81):
-        return WMO_ART["rain"]
-    if code in (65, 66, 67, 82):
-        return WMO_ART["heavy_rain"]
-    if code in (71, 73, 75, 77, 85, 86):
-        return WMO_ART["snow"]
-    if code in (95, 96, 99):
-        return WMO_ART["thunder"]
+    if code in (0, 1): return WMO_ART["clear"]
+    if code == 2: return WMO_ART["partly"]
+    if code == 3: return WMO_ART["cloudy"]
+    if code in (45, 48): return WMO_ART["fog"]
+    if code in (51, 53, 55, 56, 57): return WMO_ART["drizzle"]
+    if code in (61, 63, 80, 81): return WMO_ART["rain"]
+    if code in (65, 66, 67, 82): return WMO_ART["heavy_rain"]
+    if code in (71, 73, 75, 77, 85, 86): return WMO_ART["snow"]
+    if code in (95, 96, 99): return WMO_ART["thunder"]
     return WMO_ART["cloudy"]
-
 
 def _weather():
     now = time.time()
     if _weather_cache["d"] and now - _weather_cache["t"] < 300:
         return _weather_cache["d"]
     try:
-        loc = json.loads(urllib.request.urlopen(
-            "https://ipapi.co/json/", timeout=6
-        ).read().decode())
+        loc = json.loads(urllib.request.urlopen("https://ipapi.co/json/", timeout=6).read().decode())
         lat, lon = loc.get("latitude"), loc.get("longitude")
-        if lat is None:
-            return None
+        if lat is None: return None
         url = (
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
@@ -333,25 +344,24 @@ def _weather():
         return None
 
 
-# ── snapshot (collect once, render twice) ───────────────
+# ── snapshot (collect once) ───────────────
 def _collect():
     cpu = psutil.cpu_percent(interval=0)
     _cpu_hist.append(cpu)
-    if len(_cpu_hist) > 60:
-        _cpu_hist.pop(0)
+    if len(_cpu_hist) > 60: _cpu_hist.pop(0)
 
-    sent, recv = _net()
-    _net_hist.append(sent + recv)
-    if len(_net_hist) > 60:
-        _net_hist.pop(0)
+    up_rate, down_rate = _net()
+    _net_hist.append(up_rate + down_rate)
+    if len(_net_hist) > 60: _net_hist.pop(0)
 
     _snap.update(
         cpu=cpu,
         cpu_h=list(_cpu_hist),
         ram=psutil.virtual_memory(),
         disk=psutil.disk_usage("C:/"),
-        sent=sent, recv=recv,
+        sent=up_rate, recv=down_rate,
         net_d=[max(0, _net_hist[i] - _net_hist[i-1]) for i in range(1, len(_net_hist))],
+        speedtest=_get_speedtest(),
         procs=_procs(),
         weather=_weather(),
         now=datetime.now(),
@@ -359,54 +369,29 @@ def _collect():
 
 
 # ── drawing primitives ─────────────────────────────────
-def _draw_bg(d, w, h):
-    for y in range(0, h, 32):
-        for x in range(0, w, 32):
-            d.point((x, y), fill=SUBTLE)
+def _render(out, W, H, cfg):
+    thm = cfg["themes"][cfg["theme"]]
+    
+    def tup(k):
+        return tuple(thm[k])
+    
+    BG = tup("bg")
+    GRID = tup("grid")
+    DIM = tup("dim")
+    MID = tup("mid")
+    BRIGHT = tup("bright")
+    WHITE = tup("white")
+    BAR_BG = tup("bar_bg")
+    BAR_FILL = tup("bar_fill")
+    GRAPH_BAR = tup("graph")
 
-
-def _frame(d, x, y, w, h, title, f):
-    d.rectangle((x, y, x + w, y + h), outline=DIM)
-    t = f" {title} "
-    tw = d.textlength(t, font=f)
-    d.rectangle((x + 16, y - 11, x + 18 + tw, y + 11), fill=BG)
-    d.text((x + 17, y - 9), t, font=f, fill=WHITE)
-
-
-def _bar(d, x, y, w, pct, h=14):
-    d.rectangle((x, y, x + w, y + h), fill=BAR_BG, outline=DIM)
-    fill = max(0, int((w - 4) * min(max(pct, 0), 100) / 100))
-    if fill > 0:
-        # Draw segmented blocks instead of one solid fill
-        block_w = 4
-        gap = 2
-        for bx in range(2, fill, block_w + gap):
-            seg_w = min(block_w, fill - bx)
-            if seg_w > 0:
-                d.rectangle((x + bx, y + 2, x + bx + seg_w, y + h - 2), fill=BAR_FILL)
-
-
-def _spark(d, x, y, vals, w, h):
-    if len(vals) < 2:
-        return
-    mx = max(max(vals), 1)
-    bw = max(2, w // len(vals))
-    for i, v in enumerate(vals):
-        bh = max(1, int((v / mx) * h))
-        bx = x + i * bw
-        d.rectangle((bx, y + h - bh, bx + bw - 2, y + h), fill=GRAPH_BAR)
-
-
-def _graph_bg(d, x, y, w, h):
-    d.rectangle((x, y, x + w, y + h), fill=BAR_BG)
-
-
-# ── render ──────────────────────────────────────────────
-def _render(out, W, H):
     now = _snap.get("now", datetime.now())
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    _draw_bg(d, W, H)
+
+    for y in range(0, H, 32):
+        for x in range(0, W, 32):
+            d.point((x, y), fill=GRID)
 
     f12 = _font(12)
     f14 = _font(14)
@@ -414,6 +399,35 @@ def _render(out, W, H):
     f18 = _font(18)
     f32 = _font(32, bold=True)
 
+    def _frame(x, y, w, h, title):
+        d.rectangle((x, y, x + w, y + h), outline=DIM)
+        t = f" {title} "
+        tw = d.textlength(t, font=f16)
+        d.rectangle((x + 16, y - 11, x + 18 + tw, y + 11), fill=BG)
+        d.text((x + 17, y - 9), t, font=f16, fill=WHITE)
+
+    def _bar(x, y, w, pct, h=14):
+        d.rectangle((x, y, x + w, y + h), fill=BAR_BG, outline=DIM)
+        fill = max(0, int((w - 4) * min(max(pct, 0), 100) / 100))
+        if fill > 0:
+            block_w = 4
+            gap = 2
+            for bx in range(2, fill, block_w + gap):
+                seg_w = min(block_w, fill - bx)
+                if seg_w > 0:
+                    d.rectangle((x + bx, y + 2, x + bx + seg_w, y + h - 2), fill=BAR_FILL)
+
+    def _spark(x, y, vals, w, h):
+        if len(vals) < 2: return
+        mx = max(max(vals), 1)
+        bw = max(2, w // len(vals))
+        for i, v in enumerate(vals):
+            bh = max(1, int((v / mx) * h))
+            bx = x + i * bw
+            d.rectangle((bx, y + h - bh, bx + bw - 2, y + h), fill=GRAPH_BAR)
+
+    mods = cfg["modules"]
+    
     mx = int(W * 0.1)
     top = 240
     gap = 80
@@ -422,127 +436,130 @@ def _render(out, W, H):
     pad = 24
     inner = cw - pad * 2
 
-    cpu = _snap.get("cpu", 0)
-    cpu_h = _snap.get("cpu_h", [])
-    ram = _snap.get("ram", psutil.virtual_memory())
-    disk = _snap.get("disk", psutil.disk_usage("C:/"))
-    sent = _snap.get("sent", 0)
-    recv = _snap.get("recv", 0)
-    net_d = _snap.get("net_d", [])
-    procs = _snap.get("procs", [])
-    weather = _snap.get("weather")
-
-    # ── LEFT: System & CPU ──────────────────────────────
+    # ── LEFT COLUMN ──────────────────────────────
     ly = top
-    _frame(d, lx, ly, cw, 210, "SYSTEM", f16)
-    iy = ly + 32
-    d.text((lx + pad, iy), _cpu_name(), font=f18, fill=WHITE)
-    d.text((lx + cw - 68, iy), f"{cpu:.0f}%", font=f18, fill=WHITE)
-    iy += 32
-    _bar(d, lx + pad, iy, inner, cpu)
-    iy += 24
-    _graph_bg(d, lx + pad, iy, inner, 46)
-    _spark(d, lx + pad, iy, cpu_h, inner, 46)
-    iy += 62
-    d.text((lx + pad, iy), f"gpu:  {_gpu_name()}", font=f14, fill=MID)
-    iy += 20
-    d.text((lx + pad, iy), f"up:   {_uptime()}    os:  {_os_name()}", font=f14, fill=MID)
+    
+    if mods.get("system", True):
+        _frame(lx, ly, cw, 210, "SYSTEM")
+        iy = ly + 32
+        d.text((lx + pad, iy), _cpu_name(), font=f18, fill=WHITE)
+        d.text((lx + cw - 68, iy), f"{_snap.get('cpu', 0):.0f}%", font=f18, fill=WHITE)
+        iy += 32
+        _bar(lx + pad, iy, inner, _snap.get('cpu', 0))
+        iy += 24
+        d.rectangle((lx + pad, iy, lx + pad + inner, iy + 46), fill=BAR_BG)
+        _spark(lx + pad, iy, _snap.get("cpu_h", []), inner, 46)
+        iy += 62
+        d.text((lx + pad, iy), f"gpu:  {_gpu_name()}", font=f14, fill=MID)
+        iy += 20
+        d.text((lx + pad, iy), f"up:   {_uptime()}    os:  {_os_name()}", font=f14, fill=MID)
+        ly += 240
 
-    # ── LEFT: Memory ────────────────────────────────────
-    ly += 240  # 210 (system) + 30 (gap)
-    _frame(d, lx, ly, cw, 105, "MEMORY", f16)
-    iy = ly + 32
-    ug = ram.used / (1024**3)
-    d.text((lx + pad, iy), f"{_fmt_stor(ug)} / {_ram_total()}", font=f18, fill=WHITE)
-    d.text((lx + cw - 68, iy), f"{ram.percent:.0f}%", font=f18, fill=WHITE)
-    iy += 32
-    _bar(d, lx + pad, iy, inner, ram.percent)
+    if mods.get("memory", True):
+        _frame(lx, ly, cw, 105, "MEMORY")
+        iy = ly + 32
+        ram = _snap.get("ram", psutil.virtual_memory())
+        ug = ram.used / (1024**3)
+        d.text((lx + pad, iy), f"{_fmt_stor(ug)} / {_ram_total()}", font=f18, fill=WHITE)
+        d.text((lx + cw - 68, iy), f"{ram.percent:.0f}%", font=f18, fill=WHITE)
+        iy += 32
+        _bar(lx + pad, iy, inner, ram.percent)
+        ly += 135
 
-    # ── LEFT: Storage ───────────────────────────────────
-    ly += 135  # 105 (memory) + 30 (gap)
-    _frame(d, lx, ly, cw, 105, "STORAGE", f16)
-    iy = ly + 32
-    ug = (disk.total - disk.free) / (1024**3)
-    d.text((lx + pad, iy), f"C:\\  {_fmt_stor(ug)} / {_disk_total()}", font=f18, fill=WHITE)
-    d.text((lx + cw - 68, iy), f"{disk.percent:.0f}%", font=f18, fill=WHITE)
-    iy += 32
-    _bar(d, lx + pad, iy, inner, disk.percent)
+    if mods.get("storage", True):
+        _frame(lx, ly, cw, 105, "STORAGE")
+        iy = ly + 32
+        disk = _snap.get("disk", psutil.disk_usage("C:/"))
+        ug = (disk.total - disk.free) / (1024**3)
+        d.text((lx + pad, iy), f"C:\\  {_fmt_stor(ug)} / {_disk_total()}", font=f18, fill=WHITE)
+        d.text((lx + cw - 68, iy), f"{disk.percent:.0f}%", font=f18, fill=WHITE)
+        iy += 32
+        _bar(lx + pad, iy, inner, disk.percent)
+        ly += 135
 
-    # ── RIGHT: Weather ──────────────────────────────────
+
+    # ── RIGHT COLUMN ──────────────────────────────────
     ry = top
-    _frame(d, rx, ry, cw, 175, "WEATHER", f16)
-    if weather:
-        ay = ry + 25
-        for line in _wmo_art(weather["code"]):
-            d.text((rx + pad, ay), line, font=f16, fill=MID)
-            ay += 20
-        d.text((rx + 220, ry + 45), f"{weather['temp']}F", font=f32, fill=WHITE)
-        d.text((rx + 222, ry + 95), weather["desc"], font=f16, fill=BRIGHT)
-        feels = weather.get("feels", weather["temp"])
-        d.text((rx + 222, ry + 120), f"feels {feels}F", font=f14, fill=DIM)
-    else:
-        d.text((rx + pad, ry + 60), "no data", font=f16, fill=DIM)
+    
+    if mods.get("weather", True):
+        _frame(rx, ry, cw, 175, "WEATHER")
+        weather = _snap.get("weather")
+        if weather:
+            ay = ry + 25
+            for line in _wmo_art(weather["code"]):
+                d.text((rx + pad, ay), line, font=f16, fill=MID)
+                ay += 20
+            d.text((rx + 220, ry + 45), f"{weather['temp']}F", font=f32, fill=WHITE)
+            d.text((rx + 222, ry + 95), weather["desc"], font=f16, fill=BRIGHT)
+            feels = weather.get("feels", weather["temp"])
+            d.text((rx + 222, ry + 120), f"feels {feels}F", font=f14, fill=DIM)
+        else:
+            d.text((rx + pad, ry + 60), "no data", font=f16, fill=DIM)
+        ry += 205
 
-    # ── RIGHT: Network ──────────────────────────────────
-    ry += 205  # 175 + 30 gap
-    _frame(d, rx, ry, cw, 125, "NETWORK", f16)
-    iy = ry + 32
-    d.text((rx + pad, iy), "up:", font=f14, fill=DIM)
-    d.text((rx + pad + 40, iy), _fmt_bytes(sent), font=f18, fill=WHITE)
-    d.text((rx + cw // 2, iy), "down:", font=f14, fill=DIM)
-    d.text((rx + cw // 2 + 60, iy), _fmt_bytes(recv), font=f18, fill=WHITE)
-    iy += 40
-    _graph_bg(d, rx + pad, iy, inner, 35)
-    _spark(d, rx + pad, iy, net_d, inner, 35)
+    if mods.get("network", True):
+        _frame(rx, ry, cw, 125, "NETWORK")
+        iy = ry + 32
+        st = _snap.get("speedtest")
+        if st:
+            d.text((rx + pad, iy), "dl:", font=f14, fill=DIM)
+            d.text((rx + pad + 30, iy), f"{st['down']:.1f} Mbps", font=f18, fill=WHITE)
+            d.text((rx + cw // 2, iy), "ul:", font=f14, fill=DIM)
+            d.text((rx + cw // 2 + 30, iy), f"{st['up']:.1f} Mbps", font=f18, fill=WHITE)
+        else:
+            d.text((rx + pad, iy), "testing...", font=f14, fill=DIM)
+        
+        iy += 40
+        d.rectangle((rx + pad, iy, rx + pad + inner, iy + 35), fill=BAR_BG)
+        _spark(rx + pad, iy, _snap.get("net_d", []), inner, 35)
+        ry += 155
 
-    # ── RIGHT: Processes ────────────────────────────────
-    ry += 155  # 125 + 30 gap
-    # Left side total height: 210 + 30 + 105 + 30 + 105 = 480
-    # Right side so far: 175 + 30 + 125 + 30 = 360
-    # To match 480 exactly, the Processes box must be exactly 120 high.
-    _frame(d, rx, ry, cw, 120, "PROCESSES", f16)
-    iy = ry + 28
-    d.text((rx + pad, iy), f"{'NAME':<22}{'CPU':>7} {'MEM':>7}", font=f12, fill=DIM)
-    iy += 22
-    if not procs:
-        d.text((rx + pad, iy), "sampling...", font=f12, fill=DIM)
-    for name, cp, mm in procs[:3]:  # Show 3 to comfortably fit the 120 height
-        c = BRIGHT if cp > 2 else MID
-        d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
-        iy += 18
+    if mods.get("processes", True):
+        # We assume 120 height to make total height 480 (175+30+125+30+120=480)
+        _frame(rx, ry, cw, 120, "PROCESSES")
+        iy = ry + 28
+        d.text((rx + pad, iy), f"{'NAME':<22}{'CPU':>7} {'MEM':>7}", font=f12, fill=DIM)
+        iy += 22
+        procs = _snap.get("procs", [])
+        if not procs:
+            d.text((rx + pad, iy), "sampling...", font=f12, fill=DIM)
+        for name, cp, mm in procs[:3]:
+            c = BRIGHT if cp > 2 else MID
+            d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
+            iy += 18
+        ry += 150
 
     # ── DECORATIONS ─────────────────────────────────────
-    ac = (38, 38, 38)
-    f10 = _font(10)
-
-    # Clean text-based corner markers
-    d.text((mx - 10, top - 20), "+----", font=f10, fill=ac)
-    d.text((W - mx - 25, top - 20), "----+", font=f10, fill=ac)
+    d.text((mx - 10, top - 20), "+----", font=f10 := _font(10), fill=DIM)
+    d.text((W - mx - 25, top - 20), "----+", font=f10, fill=DIM)
     
-    bot_y = ly + 105 + 10 # Bottom of the last box (STORAGE) + small padding
-    d.text((mx - 10, bot_y), "+----", font=f10, fill=ac)
-    d.text((W - mx - 25, bot_y), "----+", font=f10, fill=ac)
+    bot_y = max(ly, ry) - 30 + 10
+    d.text((mx - 10, bot_y), "+----", font=f10, fill=DIM)
+    d.text((W - mx - 25, bot_y), "----+", font=f10, fill=DIM)
 
     # center pipe
     pipe_x = lx + cw + gap // 2
     for yp in range(top, bot_y, 24):
-        d.text((pipe_x, yp), "|", font=f12, fill=ac)
+        d.text((pipe_x, yp), "|", font=f12, fill=DIM)
 
     # ── BOTTOM STAMP ────────────────────────────────────
-    stamp = f"updated {now.strftime('%H:%M:%S')}  |  {INTERVAL}s"
+    fmt = "%I:%M:%S %p" if cfg["behavior"].get("time_format", "12-hour") == "12-hour" else "%H:%M:%S"
+    stamp = f"updated {now.strftime(fmt)}  |  {cfg['behavior']['interval']}s"
     tw = d.textlength(stamp, font=f14)
-    d.text(((W - tw) / 2, H - TASKBAR_H), stamp, font=f14, fill=DIM)
+    d.text(((W - tw) / 2, H - 100), stamp, font=f14, fill=DIM)
 
     img.save(out)
 
 
-# ── wallpaper / lockscreen / startup ────────────────────
+# ── Windows Integration ────────────────────────────────
 def _apply_wall(p):
-    ctypes.windll.user32.SystemParametersInfoW(0x0014, 0, str(p), 0x03)
+    ctypes.windll.user32.SystemParametersInfoW(0x0014, 0, str(p), 0x01 | 0x02)
 
-
-def _apply_lock(bmp):
+def _apply_lock(bmp, cfg):
+    if not cfg["behavior"]["lockscreen_enabled"]:
+        return
     try:
+        import winreg
         jpg = bmp.with_suffix(".jpg")
         Image.open(bmp).save(jpg, "JPEG", quality=95)
         ps1 = bmp.parent / "set_lockscreen.ps1"
@@ -555,38 +572,8 @@ def _apply_lock(bmp):
     except Exception:
         pass
 
-
-def _hide_overlay():
-    try:
-        u32 = ctypes.windll.user32
-        pm = u32.FindWindowW("Progman", None)
-        if not pm:
-            return
-        hwnds = []
-
-        def cb(h, _):
-            cn = ctypes.create_unicode_buffer(256)
-            u32.GetClassNameW(h, cn, 256)
-            if "DesktopOverlay" in cn.value:
-                hwnds.append(h)
-            return True
-
-        u32.EnumChildWindows(pm, _EnumCB(cb), 0)
-        for h in hwnds:
-            u32.ShowWindow(h, 0)
-            u32.SetWindowPos(h, 0, 0, 0, 0, 0, 0x83)
-    except Exception:
-        pass
-
-
-def _overlay_loop():
-    while True:
-        _hide_overlay()
-        time.sleep(0.25)
-
-
-def _disable_fade():
-    if not DISABLE_FADE:
+def _disable_fade(cfg):
+    if not cfg["behavior"]["disable_fade"]:
         return
     try:
         import winreg
@@ -600,7 +587,6 @@ def _disable_fade():
         winreg.CloseKey(k2)
     except Exception:
         pass
-
 
 def _install_startup(proj):
     startup = Path.home() / "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
@@ -631,30 +617,44 @@ def main():
         except Exception:
             pass
 
+    try:
+        log.write_text("", encoding="utf-8")
+        _log("started")
+    except Exception:
+        pass
+
+    cfg = load_config()
+
     _install_startup(proj)
-    _disable_fade()
-    threading.Thread(target=_overlay_loop, daemon=True).start()
-    _log("started")
+    _disable_fade(cfg)
 
     W, H = _screen()
 
     # Generate solid black lockscreen once
-    lock_img = Image.new("RGB", (W, H), BG)
+    lock_img = Image.new("RGB", (W, H), tuple(cfg["themes"][cfg["theme"]]["bg"]))
     lock_img.save(lock)
-    _apply_lock(lock)
+    _apply_lock(lock, cfg)
     _log("lockscreen set")
+
+    # Immediate first render
+    try:
+        _collect()
+        _render(wall, W, H, cfg)
+        _apply_wall(wall)
+        _log("first render ok")
+    except Exception as e:
+        _log(f"first render err: {e}")
 
     while True:
         try:
+            cfg = load_config()
             _collect()
-            _render(wall, W, H)
-            _hide_overlay()
+            _render(wall, W, H, cfg)
             _apply_wall(wall)
-            _hide_overlay()
             _log("ok")
         except Exception as e:
             _log(f"err: {e}")
-        time.sleep(INTERVAL)
+        time.sleep(cfg["behavior"]["interval"])
 
 
 if __name__ == "__main__":

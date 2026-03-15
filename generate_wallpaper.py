@@ -466,15 +466,29 @@ def generate_wallpaper_image(output_path: Path, width: int, height: int, compact
 
     # NETWORK
     ry += 195
-    draw_frame(draw, rx, ry, col_w, 100, "NETWORK", f16)
+    draw_frame(draw, rx, ry, col_w, 140, "NETWORK", f16)
     iy = ry + 35
     draw.text((rx + 24, iy), "up:", font=f16, fill=DIM)
     draw.text((rx + 70, iy), fmt_bytes(sent_total), font=f18, fill=WHITE)
     draw.text((rx + col_w // 2, iy), "down:", font=f16, fill=DIM)
     draw.text((rx + col_w // 2 + 70, iy), fmt_bytes(recv_total), font=f18, fill=WHITE)
+    
+    iy += 45
+    # Calculate simple network load proxy to draw a graph
+    load_val = psutil.net_io_counters().bytes_sent + psutil.net_io_counters().bytes_recv
+    if "net_history" not in STATIC_INFO:
+        STATIC_INFO["net_history"] = []
+    STATIC_INFO["net_history"].append(load_val)
+    if len(STATIC_INFO["net_history"]) > 60:
+        STATIC_INFO["net_history"].pop(0)
+        
+    # Convert cumulative to relative for the graph
+    net_deltas = [max(0, STATIC_INFO["net_history"][i] - STATIC_INFO["net_history"][i-1]) for i in range(1, len(STATIC_INFO["net_history"]))]
+    if len(net_deltas) > 1:
+        draw_sparkline(draw, rx + 24, iy, net_deltas, col_w - 48, 42)
 
     # TOP PROCESSES
-    ry += 130
+    ry += 170
     draw_frame(draw, rx, ry, col_w, 165, "TOP PROCESSES", f16)
     iy = ry + 34
     header = f"{'NAME':<22} {'CPU':>6}  {'MEM':>6}"

@@ -1,14 +1,14 @@
 """
 monochrome-wallpaper
-Live monochrome system-info wallpaper. 
-Terminal aesthetic with box frames, sparklines, and pure data.
-No personal data.
+Live-updating monochrome system dashboard wallpaper for Windows.
+Auto-detects hardware, weather, and usage. No personal data rendered.
 """
 
 import ctypes
 import ctypes.wintypes
 import json
 import os
+import platform
 import subprocess
 import sys
 import threading
@@ -20,625 +20,636 @@ from pathlib import Path
 import psutil
 from PIL import Image, ImageDraw, ImageFont
 
-
 # ── config ──────────────────────────────────────────────
 INTERVAL = 15
-TASKBAR_CLEARANCE = 110
-FONT_NAME = "CascadiaMono.ttf"
+TASKBAR_H = 100
+FONTS_DIR = "C:/Windows/Fonts"
+FONT_REGULAR = "CascadiaMono.ttf"
 FONT_BOLD = "CascadiaMonoNF-Bold.otf"
-FALLBACK_FONT = "consola.ttf"
+FONT_FALLBACK = "consola.ttf"
 
 BG = (16, 16, 16)
-GRID = (28, 28, 28)
-DIM = (80, 80, 80)
+SUBTLE = (24, 24, 24)
+DIM = (75, 75, 75)
 MID = (140, 140, 140)
-BRIGHT = (215, 215, 215)
-WHITE = (245, 245, 245)
-BAR_BG = (30, 30, 30)
-ACCENT = (100, 100, 100)
+BRIGHT = (210, 210, 210)
+WHITE = (240, 240, 240)
+BAR_BG = (28, 28, 28)
+BAR_FILL = (100, 100, 100)
+GRAPH_BAR = (90, 90, 90)
 
-CPU_HISTORY = []
-NET_HISTORY = []
-NET_STATE = {"sent": None, "recv": None, "time": None}
-PROC_STATE = {}
-WEATHER_CACHE = {"data": None, "time": 0}
-STATIC_INFO = {}
-SNAPSHOT = {}  # collected once per tick, rendered twice
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# ── runtime state ───────────────────────────────────────
+_cpu_hist = []
+_net_hist = []
+_net_prev = {"s": 0, "r": 0, "t": 0}
+_proc_prev = {"t": 0, "items": {}}
+_weather_cache = {"d": None, "t": 0}
+_static = {}
+_snap = {}
+NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_EnumCB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
 
-EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
 
-
-# ── screen ──────────────────────────────────────────────
-def get_screen_size():
+# ── helpers ─────────────────────────────────────────────
+def _ps(cmd):
     try:
-        user32 = ctypes.windll.user32
-        user32.SetProcessDPIAware()
-        return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-    except Exception:
-        return 1920, 1080
-
-
-def ps(cmd: str) -> str:
-    try:
-        result = subprocess.run(
+        r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=NO_WINDOW,
+            capture_output=True, text=True, timeout=10,
+            creationflags=NO_WIN,
         )
-        return result.stdout.strip()
+        return r.stdout.strip()
     except Exception:
         return ""
 
 
-# ── system info ─────────────────────────────────────────
-def get_cpu_name():
-    if "cpu_name" in STATIC_INFO:
-        return STATIC_INFO["cpu_name"]
-    name = ps("(Get-CimInstance Win32_Processor | Select-Object -First 1).Name")
-    cores = ps("(Get-CimInstance Win32_Processor | Select-Object -First 1).NumberOfCores")
-    for prefix in ["Intel(R) Core(TM) ", "Intel(R) ", "AMD "]:
-        name = name.replace(prefix, "")
-    value = f"{name.strip()}  {cores}c" if cores else name.strip()
-    STATIC_INFO["cpu_name"] = value
-    return value
+def _font(sz, bold=False):
+    name = FONT_BOLD if bold else FONT_REGULAR
+    try:
+        return ImageFont.truetype(f"{FONTS_DIR}/{name}", sz)
+    except OSError:
+        try:
+            return ImageFont.truetype(f"{FONTS_DIR}/{FONT_FALLBACK}", sz)
+        except OSError:
+            return ImageFont.load_default()
 
 
-def get_gpu_name():
-    if "gpu_name" in STATIC_INFO:
-        return STATIC_INFO["gpu_name"]
-    name = ps("(Get-CimInstance Win32_VideoController | Select-Object -First 1).Name")
-    for prefix in ["NVIDIA ", "AMD ", "Intel(R) "]:
-        name = name.replace(prefix, "")
-    value = name.strip()
-    STATIC_INFO["gpu_name"] = value
-    return value
+def _fmt_stor(gb):
+    return f"{gb / 1024:.1f} TB" if gb >= 1000 else f"{gb:.0f} GB"
 
 
-def get_memory_total_text():
-    if "memory_total" not in STATIC_INFO:
-        STATIC_INFO["memory_total"] = fmt_storage(psutil.virtual_memory().total / (1024 ** 3))
-    return STATIC_INFO["memory_total"]
-
-
-def get_storage_total_text():
-    if "storage_total" not in STATIC_INFO:
-        STATIC_INFO["storage_total"] = fmt_storage(psutil.disk_usage("C:/").total / (1024 ** 3))
-    return STATIC_INFO["storage_total"]
-
-
-def get_uptime():
-    delta = int(time.time() - psutil.boot_time())
-    days = delta // 86400
-    hours = (delta % 86400) // 3600
-    minutes = (delta % 3600) // 60
-    return f"{days}d {hours}h {minutes}m"
-
-
-def fmt_storage(gb):
-    if gb >= 1000:
-        return f"{gb / 1024:.1f} TB"
-    return f"{gb:.0f} GB"
-
-
-def fmt_bytes(b):
-    for unit in ["B", "KB", "MB", "GB"]:
+def _fmt_bytes(b):
+    for u in ("B", "KB", "MB", "GB"):
         if b < 1024:
-            return f"{b:.1f} {unit}"
+            return f"{b:.1f} {u}"
         b /= 1024
     return f"{b:.1f} TB"
 
 
-# ── weather ─────────────────────────────────────────────
-def get_weather():
-    now = time.time()
-    if WEATHER_CACHE["data"] and now - WEATHER_CACHE["time"] < 300:
-        return WEATHER_CACHE["data"]
+def _screen():
     try:
-        loc = json.loads(
-            urllib.request.urlopen("https://ipapi.co/json/", timeout=6).read().decode("utf-8")
-        )
-        lat = loc.get("latitude")
-        lon = loc.get("longitude")
-        if lat is None or lon is None:
+        u = ctypes.windll.user32
+        u.SetProcessDPIAware()
+        return u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+    except Exception:
+        return 1920, 1080
+
+
+# ── static info (queried once) ──────────────────────────
+def _cpu_name():
+    if "cpu" in _static:
+        return _static["cpu"]
+    n = _ps("(Get-CimInstance Win32_Processor | Select-Object -First 1).Name")
+    c = _ps("(Get-CimInstance Win32_Processor | Select-Object -First 1).NumberOfCores")
+    for p in ("Intel(R) Core(TM) ", "Intel(R) ", "AMD "):
+        n = n.replace(p, "")
+    v = f"{n.strip()}  {c}c" if c else n.strip()
+    _static["cpu"] = v
+    return v
+
+
+def _gpu_name():
+    if "gpu" in _static:
+        return _static["gpu"]
+    n = _ps("(Get-CimInstance Win32_VideoController | Select-Object -First 1).Name")
+    for p in ("NVIDIA ", "AMD ", "Intel(R) "):
+        n = n.replace(p, "")
+    v = n.strip()
+    _static["gpu"] = v
+    return v
+
+
+def _os_name():
+    if "os" in _static:
+        return _static["os"]
+    v = f"{platform.system()} {platform.release()}"
+    _static["os"] = v
+    return v
+
+
+def _ram_total():
+    if "ramt" not in _static:
+        _static["ramt"] = _fmt_stor(psutil.virtual_memory().total / (1024**3))
+    return _static["ramt"]
+
+
+def _disk_total():
+    if "diskt" not in _static:
+        _static["diskt"] = _fmt_stor(psutil.disk_usage("C:/").total / (1024**3))
+    return _static["diskt"]
+
+
+# ── live metrics ────────────────────────────────────────
+def _uptime():
+    d = int(time.time() - psutil.boot_time())
+    return f"{d // 86400}d {(d % 86400) // 3600}h {(d % 3600) // 60}m"
+
+
+def _net():
+    c = psutil.net_io_counters()
+    _net_prev["s"] = c.bytes_sent
+    _net_prev["r"] = c.bytes_recv
+    _net_prev["t"] = time.time()
+    return c.bytes_sent, c.bytes_recv
+
+
+def _procs():
+    cur = {}
+    for p in psutil.process_iter(["pid", "name", "cpu_times", "memory_percent"]):
+        try:
+            i = p.info
+            ct = i.get("cpu_times")
+            if not ct:
+                continue
+            cur[i["pid"]] = {
+                "n": i.get("name") or "?",
+                "c": float(ct.user + ct.system),
+                "m": i.get("memory_percent") or 0.0,
+            }
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    now = time.time()
+    if not _proc_prev["items"]:
+        _proc_prev.update(t=now, items=cur)
+        return []
+    dt = max(now - _proc_prev["t"], 0.1)
+    nc = max(psutil.cpu_count() or 1, 1)
+    rows = []
+    skip = {"idle", "system idle process", "python.exe", "pythonw.exe",
+            "python3.13.exe", "pythonw3.13.exe"}
+    for pid, it in cur.items():
+        prev = _proc_prev["items"].get(pid)
+        if not prev:
+            continue
+        cp = max(0, min(999, (it["c"] - prev["c"]) / dt * 100 / nc))
+        if it["n"].lower() not in skip:
+            rows.append((it["n"], cp, it["m"]))
+    _proc_prev.update(t=now, items=cur)
+    rows.sort(key=lambda r: r[1], reverse=True)
+    return rows[:5]
+
+
+# ── weather ─────────────────────────────────────────────
+WMO_DESC = {
+    0: "clear sky", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+    45: "fog", 48: "rime fog",
+    51: "light drizzle", 53: "drizzle", 55: "heavy drizzle",
+    56: "freezing drizzle", 57: "heavy freezing drizzle",
+    61: "light rain", 63: "rain", 65: "heavy rain",
+    66: "freezing rain", 67: "heavy freezing rain",
+    71: "light snow", 73: "snow", 75: "heavy snow",
+    77: "snow grains",
+    80: "light showers", 81: "showers", 82: "heavy showers",
+    85: "light snow showers", 86: "heavy snow showers",
+    95: "thunderstorm", 96: "thunderstorm + hail", 99: "severe thunderstorm",
+}
+
+WMO_ART = {
+    "clear": [
+        r"        \   |   /        ",
+        r"         \  |  /         ",
+        r"     ---  (   )  ---     ",
+        r"         /  |  \         ",
+        r"        /   |   \        ",
+    ],
+    "partly": [
+        r"    \  |  /              ",
+        r"     (   )  .---.       ",
+        r"    / |  .-(     ).     ",
+        r"       (___.___.__)     ",
+        r"                        ",
+    ],
+    "cloudy": [
+        r"                        ",
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"                        ",
+    ],
+    "fog": [
+        r"                        ",
+        r"     ---  ---  ---      ",
+        r"      ---  ---  ---     ",
+        r"     ---  ---  ---      ",
+        r"                        ",
+    ],
+    "drizzle": [
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"       .  .  .  .       ",
+        r"      .  .  .  .        ",
+    ],
+    "rain": [
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"      /  /  /  /        ",
+        r"     /  /  /  /         ",
+    ],
+    "heavy_rain": [
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"     // // // //        ",
+        r"    // // // //         ",
+    ],
+    "snow": [
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"      *  *  *  *        ",
+        r"     *  *  *  *         ",
+    ],
+    "thunder": [
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"       /_/   /_/        ",
+        r"      /     /           ",
+    ],
+    "hail": [
+        r"         .---.          ",
+        r"      .-(     ).        ",
+        r"     (___.___.__)       ",
+        r"      o  o  o  o        ",
+        r"     o  o  o  o         ",
+    ],
+}
+
+
+def _wmo_art(code):
+    if code in (0, 1):
+        return WMO_ART["clear"]
+    if code == 2:
+        return WMO_ART["partly"]
+    if code == 3:
+        return WMO_ART["cloudy"]
+    if code in (45, 48):
+        return WMO_ART["fog"]
+    if code in (51, 53, 55, 56, 57):
+        return WMO_ART["drizzle"]
+    if code in (61, 63, 80, 81):
+        return WMO_ART["rain"]
+    if code in (65, 66, 67, 82):
+        return WMO_ART["heavy_rain"]
+    if code in (71, 73, 75, 77, 85, 86):
+        return WMO_ART["snow"]
+    if code in (95, 96, 99):
+        return WMO_ART["thunder"]
+    return WMO_ART["cloudy"]
+
+
+def _weather():
+    now = time.time()
+    if _weather_cache["d"] and now - _weather_cache["t"] < 300:
+        return _weather_cache["d"]
+    try:
+        loc = json.loads(urllib.request.urlopen(
+            "https://ipapi.co/json/", timeout=6
+        ).read().decode())
+        lat, lon = loc.get("latitude"), loc.get("longitude")
+        if lat is None:
             return None
         url = (
-            "https://api.open-meteo.com/v1/forecast"
+            f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            "&current=temperature_2m,weather_code"
-            "&temperature_unit=fahrenheit"
+            f"&current=temperature_2m,weather_code"
+            f"&temperature_unit=fahrenheit"
         )
-        data = json.loads(urllib.request.urlopen(url, timeout=8).read().decode("utf-8"))
-        current = data.get("current", {})
-        code = int(current.get("weather_code", 3))
-        weather = {
-            "temp_f": round(float(current.get("temperature_2m", 0))),
-            "desc": weather_code_to_desc(code),
+        data = json.loads(urllib.request.urlopen(url, timeout=8).read().decode())
+        cur = data.get("current", {})
+        code = int(cur.get("weather_code", 3))
+        w = {
+            "temp": round(float(cur.get("temperature_2m", 0))),
+            "desc": WMO_DESC.get(code, "conditions"),
             "code": code,
         }
-        WEATHER_CACHE["data"] = weather
-        WEATHER_CACHE["time"] = now
-        return weather
+        _weather_cache.update(d=w, t=now)
+        return w
     except Exception:
         return None
 
 
-def weather_code_to_desc(code):
-    mapping = {
-        0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "cloudy",
-        45: "fog", 48: "rime fog", 51: "light drizzle", 53: "drizzle",
-        55: "dense drizzle", 61: "light rain", 63: "rain", 65: "heavy rain",
-        71: "light snow", 73: "snow", 75: "heavy snow", 80: "rain showers",
-        81: "heavy showers", 82: "violent showers", 95: "thunderstorm",
-    }
-    return mapping.get(code, "conditions")
+# ── snapshot (collect once, render twice) ───────────────
+def _collect():
+    cpu = psutil.cpu_percent(interval=0)
+    _cpu_hist.append(cpu)
+    if len(_cpu_hist) > 60:
+        _cpu_hist.pop(0)
+
+    sent, recv = _net()
+    _net_hist.append(sent + recv)
+    if len(_net_hist) > 60:
+        _net_hist.pop(0)
+
+    _snap.update(
+        cpu=cpu,
+        cpu_h=list(_cpu_hist),
+        ram=psutil.virtual_memory(),
+        disk=psutil.disk_usage("C:/"),
+        sent=sent, recv=recv,
+        net_d=[max(0, _net_hist[i] - _net_hist[i-1]) for i in range(1, len(_net_hist))],
+        procs=_procs(),
+        weather=_weather(),
+        now=datetime.now(),
+    )
 
 
-def weather_ascii(code):
-    if code in (0, 1):
-        return ["    \\  |  /    ", "      .-.      ", "   -- ( ) --   ", "      '-'      ", "    /  |  \\    "]
-    if code in (2, 3):
-        return ["                ", "      .--.      ", "   .-(    ).    ", "  (___.__)__)   ", "                "]
-    if code in (45, 48):
-        return ["                ", "   -  -  -  -   ", "    -  -  -     ", "   -  -  -  -   ", "                "]
-    if code in (51, 53, 55, 61, 63, 65, 80, 81, 82):
-        return ["      .--.      ", "   .-(    ).    ", "  (___.__)__)   ", "   / / / / /    ", "  / / / / /     "]
-    if code in (71, 73, 75):
-        return ["      .--.      ", "   .-(    ).    ", "  (___.__)__)   ", "    *  *  *     ", "   *  *  *      "]
-    if code == 95:
-        return ["      .--.      ", "   .-(    ).    ", "  (___.__)__)   ", "     / /        ", "    /_/         "]
-    return ["      .--.      ", "   .-(    ).    ", "  (___.__)__)   "]
+# ── drawing primitives ─────────────────────────────────
+def _draw_bg(d, w, h):
+    for y in range(0, h, 32):
+        for x in range(0, w, 32):
+            d.point((x, y), fill=SUBTLE)
 
 
-# ── font loader ─────────────────────────────────────────
-def load_font(size, bold=False):
-    fonts_dir = "C:/Windows/Fonts"
-    chosen = FONT_BOLD if bold else FONT_NAME
-    try:
-        return ImageFont.truetype(f"{fonts_dir}/{chosen}", size)
-    except OSError:
-        return ImageFont.truetype(f"{fonts_dir}/{FALLBACK_FONT}", size)
+def _frame(d, x, y, w, h, title, f):
+    d.rectangle((x, y, x + w, y + h), outline=DIM)
+    t = f" {title} "
+    tw = d.textlength(t, font=f)
+    d.rectangle((x + 16, y - 11, x + 18 + tw, y + 11), fill=BG)
+    d.text((x + 17, y - 9), t, font=f, fill=WHITE)
 
 
-# ── drawing helpers ─────────────────────────────────────
-def draw_bg(draw, width, height):
-    for y in range(0, height, 28):
-        for x in range(0, width, 28):
-            draw.point((x, y), fill=GRID)
+def _bar(d, x, y, w, pct, h=14):
+    d.rectangle((x, y, x + w, y + h), fill=BAR_BG, outline=DIM)
+    fill = max(0, int((w - 4) * min(max(pct, 0), 100) / 100))
+    if fill > 0:
+        d.rectangle((x + 2, y + 2, x + 2 + fill, y + h - 2), fill=BAR_FILL)
 
 
-def draw_frame(draw, x, y, w, h, title, font):
-    draw.rectangle((x, y, x + w, y + h), outline=DIM)
-    title_text = f" {title} "
-    tw = draw.textlength(title_text, font=font)
-    draw.rectangle((x + 18, y - 12, x + 18 + tw, y + 12), fill=BG)
-    draw.text((x + 18, y - 10), title_text, font=font, fill=WHITE)
-
-
-def draw_bar(draw, x, y, width, pct, height=14):
-    draw.rectangle((x, y, x + width, y + height), fill=BAR_BG, outline=DIM)
-    inner = max(0, int((width - 4) * min(max(pct, 0), 100) / 100))
-    if inner > 0:
-        draw.rectangle((x + 2, y + 2, x + 2 + inner, y + height - 2), fill=MID)
-
-
-def draw_sparkline(draw, x, y, values, width, height):
-    if len(values) < 2:
+def _spark(d, x, y, vals, w, h):
+    if len(vals) < 2:
         return
-    maximum = max(max(values), 1)
-    bar_w = max(2, width // len(values))
-    for i, value in enumerate(values):
-        bar_h = max(1, int((value / maximum) * height))
-        bx = x + i * bar_w
-        draw.rectangle((bx, y + height - bar_h, bx + bar_w - 2, y + height), fill=ACCENT)
+    mx = max(max(vals), 1)
+    bw = max(2, w // len(vals))
+    for i, v in enumerate(vals):
+        bh = max(1, int((v / mx) * h))
+        bx = x + i * bw
+        d.rectangle((bx, y + h - bh, bx + bw - 2, y + h), fill=GRAPH_BAR)
 
 
-# ── state & metrics ─────────────────────────────────────
-def update_net_rates():
-    counters = psutil.net_io_counters()
-    now = time.time()
-    if NET_STATE["time"] is None:
-        NET_STATE["sent"] = counters.bytes_sent
-        NET_STATE["recv"] = counters.bytes_recv
-        NET_STATE["time"] = now
-        return counters.bytes_sent, counters.bytes_recv
-    NET_STATE["sent"] = counters.bytes_sent
-    NET_STATE["recv"] = counters.bytes_recv
-    NET_STATE["time"] = now
-    return counters.bytes_sent, counters.bytes_recv
-
-
-def update_process_state():
-    current = {}
-    for proc in psutil.process_iter(["pid", "name", "cpu_times", "memory_percent"]):
-        try:
-            info = proc.info
-            cpu_times = info.get("cpu_times")
-            if not cpu_times:
-                continue
-            total_cpu = float(cpu_times.user + cpu_times.system)
-            current[info["pid"]] = {
-                "name": info.get("name") or "?",
-                "cpu_total": total_cpu,
-                "mem": info.get("memory_percent") or 0.0,
-            }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    now = time.time()
-    if not PROC_STATE:
-        PROC_STATE["time"] = now
-        PROC_STATE["items"] = current
-        return []
-    dt = max(now - PROC_STATE["time"], 0.1)
-    cpu_count = max(psutil.cpu_count() or 1, 1)
-    rows = []
-    for pid, item in current.items():
-        prev = PROC_STATE["items"].get(pid)
-        if not prev:
-            continue
-        delta = item["cpu_total"] - prev["cpu_total"]
-        cpu_pct = max(0.0, min(999.0, (delta / dt) * 100 / cpu_count))
-        name = item["name"]
-        if name.lower() in ("idle", "system idle process", "python.exe", "pythonw.exe"):
-            continue
-        rows.append((name, cpu_pct, item["mem"]))
-    PROC_STATE["time"] = now
-    PROC_STATE["items"] = current
-    rows.sort(key=lambda row: row[1], reverse=True)
-    return rows[:4]
-
-
-def overlay_suppression_loop():
-    while True:
-        try:
-            hide_desktop_overlay()
-        except Exception:
-            pass
-        time.sleep(0.25)
-
-
-def apply_wallpaper(path: Path):
-    SPI_SETDESKWALLPAPER = 0x0014
-    SPIF_UPDATEINIFILE = 0x01
-    SPIF_SENDCHANGE = 0x02
-    ctypes.windll.user32.SystemParametersInfoW(
-        SPI_SETDESKWALLPAPER,
-        0,
-        str(path),
-        SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
-    )
-
-
-def hide_desktop_overlay():
-    user32 = ctypes.windll.user32
-    progman = user32.FindWindowW("Progman", None)
-    if not progman:
-        return False
-
-    overlay_hwnds = []
-
-    def callback(hwnd, _lparam):
-        class_name = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, class_name, 256)
-        if "DesktopOverlay" in class_name.value:
-            overlay_hwnds.append(hwnd)
-        return True
-
-    user32.EnumChildWindows(progman, EnumWindowsProc(callback), 0)
-    hidden_any = False
-    for hwnd in overlay_hwnds:
-        try:
-            user32.ShowWindow(hwnd, 0)
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0080)
-            hidden_any = True
-        except Exception:
-            pass
-    return hidden_any
-
-
-def try_set_lock_screen(bmp_path: Path):
-    """Set lock screen via registry PersonalizationCSP key."""
-    try:
-        import winreg
-        jpg_path = bmp_path.with_suffix(".jpg")
-        Image.open(bmp_path).save(jpg_path, "JPEG", quality=95)
-        key = winreg.CreateKeyEx(
-            winreg.HKEY_CURRENT_USER,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP",
-            0,
-            winreg.KEY_SET_VALUE,
-        )
-        winreg.SetValueEx(key, "LockScreenImagePath", 0, winreg.REG_SZ, str(jpg_path))
-        winreg.SetValueEx(key, "LockScreenImageUrl", 0, winreg.REG_SZ, str(jpg_path))
-        winreg.SetValueEx(key, "LockScreenImageStatus", 0, winreg.REG_DWORD, 1)
-        winreg.CloseKey(key)
-        return True
-    except Exception:
-        return False
-
-
-def write_startup_launcher(project_dir: Path):
-    startup_dir = Path(os.path.expanduser(r"~\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"))
-    startup_dir.mkdir(parents=True, exist_ok=True)
-    vbs_path = startup_dir / "monochrome-wallpaper.vbs"
-    py_path = project_dir / "generate_wallpaper.py"
-    pythonw = sys.executable.replace("python.exe", "pythonw.exe")
-    if not Path(pythonw).exists():
-        pythonw = sys.executable
-    launcher = (
-        'Set WshShell = CreateObject("WScript.Shell")\r\n'
-        f'WshShell.Run "\"{pythonw}\" \"{py_path}\"", 0, False\r\n'
-    )
-    vbs_path.write_text(launcher, encoding="ascii")
-    return vbs_path
+def _graph_bg(d, x, y, w, h):
+    d.rectangle((x, y, x + w, y + h), fill=BAR_BG)
 
 
 # ── render ──────────────────────────────────────────────
-def generate_wallpaper_image(output_path: Path, width: int, height: int, compact=False):
-    global CPU_HISTORY
-    now = datetime.now()
-    img = Image.new("RGB", (width, height), BG)
-    draw = ImageDraw.Draw(img)
-    draw_bg(draw, width, height)
+def _render(out, W, H, compact=False):
+    now = _snap.get("now", datetime.now())
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    _draw_bg(d, W, H)
 
-    f14 = load_font(14)
-    f16 = load_font(16)
-    f18 = load_font(18)
-    f34 = load_font(34, bold=True)
+    f12 = _font(12)
+    f14 = _font(14)
+    f16 = _font(16)
+    f18 = _font(18)
+    f32 = _font(32, bold=True)
 
-    # Calculate layout matching
-    margin_x = int(width * 0.1)
-    margin_top = 260 if not compact else 180
-    col_gap = 100
-    col_w = (width - margin_x * 2 - col_gap) // 2
-    lx = margin_x
-    rx = margin_x + col_w + col_gap
+    mx = int(W * 0.1)
+    top = 240 if not compact else 160
+    gap = 80
+    cw = (W - mx * 2 - gap) // 2
+    lx, rx = mx, mx + cw + gap
+    pad = 24
+    inner = cw - pad * 2
 
-    # Use pre-collected snapshot (collected once per tick)
-    cpu_pct = SNAPSHOT.get("cpu_pct", 0)
-    cpu_history = SNAPSHOT.get("cpu_history", [])
-    ram = SNAPSHOT.get("ram", psutil.virtual_memory())
-    disk = SNAPSHOT.get("disk", psutil.disk_usage("C:/"))
-    sent_total = SNAPSHOT.get("sent_total", 0)
-    recv_total = SNAPSHOT.get("recv_total", 0)
-    net_deltas = SNAPSHOT.get("net_deltas", [])
-    procs = SNAPSHOT.get("procs", [])
-    weather = SNAPSHOT.get("weather", None)
+    cpu = _snap.get("cpu", 0)
+    cpu_h = _snap.get("cpu_h", [])
+    ram = _snap.get("ram", psutil.virtual_memory())
+    disk = _snap.get("disk", psutil.disk_usage("C:/"))
+    sent = _snap.get("sent", 0)
+    recv = _snap.get("recv", 0)
+    net_d = _snap.get("net_d", [])
+    procs = _snap.get("procs", [])
+    weather = _snap.get("weather")
 
-    # ════════════════════════════════════════════════════
-    # LEFT COLUMN (HARDWARE)
-    # ════════════════════════════════════════════════════
-    # SYSTEM & CPU
-    ly = margin_top
-    draw_frame(draw, lx, ly, col_w, 205, "SYSTEM & CPU", f16)
-    iy = ly + 35
-    draw.text((lx + 24, iy), get_cpu_name(), font=f18, fill=WHITE)
-    draw.text((lx + col_w - 70, iy), f"{cpu_pct:3.0f}%", font=f18, fill=WHITE)
-    iy += 34
-    draw_bar(draw, lx + 24, iy, col_w - 48, cpu_pct)
-    iy += 26
-    cpu_graph_x = lx + 24
-    cpu_graph_w = col_w - 48
-    cpu_graph_h = 42
-    draw.rectangle((cpu_graph_x, iy, cpu_graph_x + cpu_graph_w, iy + cpu_graph_h), fill=BAR_BG)
-    draw_sparkline(draw, cpu_graph_x, iy, cpu_history, cpu_graph_w, cpu_graph_h)
-    iy += 60
-    draw.text((lx + 24, iy), "gpu:", font=f14, fill=DIM)
-    draw.text((lx + 74, iy), get_gpu_name(), font=f14, fill=MID)
-    iy += 22
-    draw.text((lx + 24, iy), "uptime:", font=f14, fill=DIM)
-    draw.text((lx + 92, iy), get_uptime(), font=f14, fill=MID)
-
-    # MEMORY
-    ly += 235 # Ensure vertical gap matches right side
-    draw_frame(draw, lx, ly, col_w, 125, "MEMORY", f16)
-    iy = ly + 35
-    used_gb = ram.used / (1024 ** 3)
-    draw.text((lx + 24, iy), f"{fmt_storage(used_gb)} / {get_memory_total_text()}", font=f18, fill=WHITE)
-    draw.text((lx + col_w - 70, iy), f"{ram.percent:3.0f}%", font=f18, fill=WHITE)
-    iy += 34
-    draw_bar(draw, lx + 24, iy, col_w - 48, ram.percent)
-
-    # STORAGE
-    ly += 155
-    draw_frame(draw, lx, ly, col_w, 125, "STORAGE", f16)
-    iy = ly + 35
-    used_disk_gb = (disk.total - disk.free) / (1024 ** 3)
-    draw.text((lx + 24, iy), f"C:\\   {fmt_storage(used_disk_gb)} / {get_storage_total_text()}", font=f18, fill=WHITE)
-    draw.text((lx + col_w - 70, iy), f"{disk.percent:3.0f}%", font=f18, fill=WHITE)
-    iy += 34
-    draw_bar(draw, lx + 24, iy, col_w - 48, disk.percent)
-
-    # ════════════════════════════════════════════════════
-    # RIGHT COLUMN (WEATHER & NETWORK & PROCESSES)
-    # ════════════════════════════════════════════════════
-    ry = margin_top
-
-    # WEATHER
-    draw_frame(draw, rx, ry, col_w, 165, "WEATHER", f16)
-    if weather:
-        art_y = ry + 32
-        for line in weather_ascii(weather["code"]):
-            draw.text((rx + 26, art_y), line, font=f18, fill=MID)
-            art_y += 22
-        draw.text((rx + 230, ry + 42), f"{weather['temp_f']}F", font=f34, fill=WHITE)
-        draw.text((rx + 232, ry + 92), weather["desc"], font=f18, fill=BRIGHT)
-    else:
-        draw.text((rx + 26, ry + 48), "weather unavailable", font=f18, fill=DIM)
-
-    # NETWORK
-    ry += 195
-    draw_frame(draw, rx, ry, col_w, 140, "NETWORK", f16)
-    iy = ry + 35
-    draw.text((rx + 24, iy), "up:", font=f16, fill=DIM)
-    draw.text((rx + 70, iy), fmt_bytes(sent_total), font=f18, fill=WHITE)
-    draw.text((rx + col_w // 2, iy), "down:", font=f16, fill=DIM)
-    draw.text((rx + col_w // 2 + 70, iy), fmt_bytes(recv_total), font=f18, fill=WHITE)
-    
-    iy += 45
-    graph_x = rx + 24
-    graph_w = col_w - 48
-    graph_h = 42
-    # Always draw the graph area background so it's never empty
-    draw.rectangle((graph_x, iy, graph_x + graph_w, iy + graph_h), fill=BAR_BG)
-    if len(net_deltas) > 1:
-        draw_sparkline(draw, graph_x, iy, net_deltas, graph_w, graph_h)
-
-    # TOP PROCESSES
-    ry += 170
-    draw_frame(draw, rx, ry, col_w, 165, "TOP PROCESSES", f16)
-    iy = ry + 34
-    header = f"{'NAME':<22} {'CPU':>6}  {'MEM':>6}"
-    draw.text((rx + 24, iy), header, font=f14, fill=DIM)
+    # ── LEFT: System & CPU ──────────────────────────────
+    ly = top
+    _frame(d, lx, ly, cw, 210, "SYSTEM", f16)
+    iy = ly + 32
+    d.text((lx + pad, iy), _cpu_name(), font=f18, fill=WHITE)
+    d.text((lx + cw - 68, iy), f"{cpu:.0f}%", font=f18, fill=WHITE)
+    iy += 32
+    _bar(d, lx + pad, iy, inner, cpu)
     iy += 24
+    _graph_bg(d, lx + pad, iy, inner, 46)
+    _spark(d, lx + pad, iy, cpu_h, inner, 46)
+    iy += 62
+    d.text((lx + pad, iy), f"gpu:  {_gpu_name()}", font=f14, fill=MID)
+    iy += 20
+    d.text((lx + pad, iy), f"up:   {_uptime()}    os:  {_os_name()}", font=f14, fill=MID)
+
+    # ── LEFT: Memory ────────────────────────────────────
+    ly += 240
+    _frame(d, lx, ly, cw, 105, "MEMORY", f16)
+    iy = ly + 32
+    ug = ram.used / (1024**3)
+    d.text((lx + pad, iy), f"{_fmt_stor(ug)} / {_ram_total()}", font=f18, fill=WHITE)
+    d.text((lx + cw - 68, iy), f"{ram.percent:.0f}%", font=f18, fill=WHITE)
+    iy += 32
+    _bar(d, lx + pad, iy, inner, ram.percent)
+
+    # ── LEFT: Storage ───────────────────────────────────
+    ly += 135
+    _frame(d, lx, ly, cw, 105, "STORAGE", f16)
+    iy = ly + 32
+    ug = (disk.total - disk.free) / (1024**3)
+    d.text((lx + pad, iy), f"C:\\  {_fmt_stor(ug)} / {_disk_total()}", font=f18, fill=WHITE)
+    d.text((lx + cw - 68, iy), f"{disk.percent:.0f}%", font=f18, fill=WHITE)
+    iy += 32
+    _bar(d, lx + pad, iy, inner, disk.percent)
+
+    # ── RIGHT: Weather ──────────────────────────────────
+    ry = top
+    _frame(d, rx, ry, cw, 170, "WEATHER", f16)
+    if weather:
+        ay = ry + 30
+        for line in _wmo_art(weather["code"]):
+            d.text((rx + pad, ay), line, font=f16, fill=MID)
+            ay += 22
+        d.text((rx + 230, ry + 40), f"{weather['temp']}F", font=f32, fill=WHITE)
+        d.text((rx + 232, ry + 88), weather["desc"], font=f16, fill=BRIGHT)
+    else:
+        d.text((rx + pad, ry + 60), "no data", font=f16, fill=DIM)
+
+    # ── RIGHT: Network ──────────────────────────────────
+    ry += 200
+    _frame(d, rx, ry, cw, 130, "NETWORK", f16)
+    iy = ry + 32
+    d.text((rx + pad, iy), "up:", font=f14, fill=DIM)
+    d.text((rx + pad + 40, iy), _fmt_bytes(sent), font=f18, fill=WHITE)
+    d.text((rx + cw // 2, iy), "down:", font=f14, fill=DIM)
+    d.text((rx + cw // 2 + 60, iy), _fmt_bytes(recv), font=f18, fill=WHITE)
+    iy += 40
+    _graph_bg(d, rx + pad, iy, inner, 40)
+    _spark(d, rx + pad, iy, net_d, inner, 40)
+
+    # ── RIGHT: Processes ────────────────────────────────
+    ry += 160
+    _frame(d, rx, ry, cw, 150, "PROCESSES", f16)
+    iy = ry + 32
+    d.text((rx + pad, iy), f"{'NAME':<22}{'CPU':>7} {'MEM':>7}", font=f12, fill=DIM)
+    iy += 22
     if not procs:
-        draw.text((rx + 24, iy), "sampling...", font=f14, fill=DIM)
-    for name, cpu, mem in procs:
-        line = f"{name[:20]:<22} {cpu:5.1f}%  {mem:5.1f}%"
-        draw.text((rx + 24, iy), line, font=f14, fill=BRIGHT if cpu > 2 else MID)
-        iy += 24
+        d.text((rx + pad, iy), "sampling...", font=f12, fill=DIM)
+    for name, cp, mm in procs:
+        c = BRIGHT if cp > 2 else MID
+        d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
+        iy += 20
 
-    # ════════════════════════════════════════════════════
-    # ASCII ART DECORATIONS
-    # ════════════════════════════════════════════════════
-    f12 = load_font(12)
-    art_color = (38, 38, 38)  # Very subtle, just above background
+    # ── DECORATIONS ─────────────────────────────────────
+    ac = (32, 32, 32)
 
-    # Top-left corner circuit pattern
-    circuit_top = [
-        "  .-------.        .---.",
-        "  |       |---+----|   |",
-        "  '-------'   |    '---'",
-        "       .------+------. ",
-        "       |      |      | ",
-        "       '------+------' ",
-    ]
-    for i, line in enumerate(circuit_top):
-        draw.text((margin_x, 40 + i * 16), line, font=f12, fill=art_color)
+    # top-left: hex addresses
+    for i in range(4):
+        addr = f"0x{0xC000 + i * 0x40:04X}"
+        d.text((mx, 50 + i * 16), addr, font=f12, fill=ac)
 
-    # Top-right corner signal wave
-    signal = [
-        "        .  .        ",
-        "       / \\/ \\       ",
-        "  ----'    '----    ",
-        "                    ",
-    ]
-    for i, line in enumerate(signal):
-        sw = draw.textlength(line, font=f12)
-        draw.text((width - margin_x - int(sw), 50 + i * 16), line, font=f12, fill=art_color)
+    # top-right: signal bars
+    for i in range(8):
+        bh = 4 + i * 3
+        bx = W - mx - (8 - i) * 10
+        by = 80 - bh
+        d.rectangle((bx, by, bx + 6, 80), fill=ac)
 
-    # Bottom-left data stream
-    stream = [
-        "  01001110 01101111",
-        "  01100100 01100101",
-        "  00101110 01101010",
-    ]
-    bot_art_y = height - TASKBAR_CLEARANCE - 70
-    for i, line in enumerate(stream):
-        draw.text((margin_x, bot_art_y + i * 16), line, font=f12, fill=art_color)
+    # bottom-left: hex dump
+    bot = H - TASKBAR_H - 60
+    for i in range(3):
+        row = " ".join(f"{(0xDE + i * 8 + j) & 0xFF:02X}" for j in range(8))
+        d.text((mx, bot + i * 16), row, font=f12, fill=ac)
 
-    # Bottom-right matrix drip
-    drip = [
-        "  |  :  |  :  |  :",
-        "  :  |  :  |  :  |",
-        "  |  :  |  :  |  :",
-    ]
-    for i, line in enumerate(drip):
-        dw = draw.textlength(line, font=f12)
-        draw.text((width - margin_x - int(dw), bot_art_y + i * 16), line, font=f12, fill=art_color)
+    # bottom-right: uptime pulse
+    pulse_y = bot + 8
+    pulse_w = 180
+    px = W - mx - pulse_w
+    for i in range(pulse_w):
+        import math
+        h_val = int(8 * abs(math.sin(i * 0.08)))
+        d.line((px + i, pulse_y - h_val, px + i, pulse_y + h_val), fill=ac)
 
-    # Center gap between columns — vertical data pipe
-    pipe_x = lx + col_w + col_gap // 2 - 4
-    for y_pos in range(margin_top + 20, margin_top + 520, 18):
-        char = "|" if (y_pos // 18) % 3 != 0 else ":"
-        draw.text((pipe_x, y_pos), char, font=f12, fill=art_color)
+    # center pipe
+    pipe_x = lx + cw + gap // 2
+    for yp in range(top, top + 500, 24):
+        d.rectangle((pipe_x, yp, pipe_x + 1, yp + 12), fill=ac)
 
-    # ════════════════════════════════════════════════════
-    # BOTTOM
-    # ════════════════════════════════════════════════════
-    stamp = f"updated {now.strftime('%H:%M:%S')}  |  interval {INTERVAL}s"
-    tw = draw.textlength(stamp, font=f14)
-    draw.text(((width - tw) / 2, height - TASKBAR_CLEARANCE), stamp, font=f14, fill=DIM)
+    # ── BOTTOM STAMP ────────────────────────────────────
+    stamp = f"updated {now.strftime('%H:%M:%S')}  |  {INTERVAL}s"
+    tw = d.textlength(stamp, font=f14)
+    d.text(((W - tw) / 2, H - TASKBAR_H), stamp, font=f14, fill=DIM)
 
-    img.save(output_path)
-    return output_path
+    img.save(out)
 
 
-def collect_snapshot():
-    """Collect all live data ONCE per tick. Render uses this snapshot."""
-    cpu_pct = psutil.cpu_percent(interval=0)
-    CPU_HISTORY.append(cpu_pct)
-    if len(CPU_HISTORY) > 60:
-        CPU_HISTORY.pop(0)
-
-    sent_total, recv_total = update_net_rates()
-    NET_HISTORY.append(sent_total + recv_total)
-    if len(NET_HISTORY) > 60:
-        NET_HISTORY.pop(0)
-
-    SNAPSHOT["cpu_pct"] = cpu_pct
-    SNAPSHOT["cpu_history"] = list(CPU_HISTORY)
-    SNAPSHOT["ram"] = psutil.virtual_memory()
-    SNAPSHOT["disk"] = psutil.disk_usage("C:/")
-    SNAPSHOT["sent_total"] = sent_total
-    SNAPSHOT["recv_total"] = recv_total
-    SNAPSHOT["net_deltas"] = [
-        max(0, NET_HISTORY[i] - NET_HISTORY[i - 1])
-        for i in range(1, len(NET_HISTORY))
-    ]
-    SNAPSHOT["procs"] = update_process_state()
-    SNAPSHOT["weather"] = get_weather()
-    SNAPSHOT["now"] = datetime.now()
+# ── wallpaper / lockscreen / startup ────────────────────
+def _apply_wall(p):
+    ctypes.windll.user32.SystemParametersInfoW(0x0014, 0, str(p), 0x03)
 
 
-def generate_assets(project_dir: Path):
-    wall_path = project_dir / "wallpaper.bmp"
-    lock_path = project_dir / "lockscreen.bmp"
-    width, height = get_screen_size()
-    collect_snapshot()
-    generate_wallpaper_image(wall_path, width, height, compact=False)
-    generate_wallpaper_image(lock_path, width, height, compact=True)
-    return wall_path, lock_path
-
-
-def disable_wallpaper_fade():
-    """Disable the Windows wallpaper crossfade transition."""
+def _apply_lock(bmp):
     try:
         import winreg
-        key = winreg.OpenKey(
+        jpg = bmp.with_suffix(".jpg")
+        Image.open(bmp).save(jpg, "JPEG", quality=95)
+        k = winreg.CreateKeyEx(
             winreg.HKEY_CURRENT_USER,
-            r"Control Panel\Desktop",
-            0,
-            winreg.KEY_SET_VALUE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP",
+            0, winreg.KEY_SET_VALUE,
         )
-        winreg.SetValueEx(key, "WallpaperTransitionMode", 0, winreg.REG_DWORD, 0)
-        winreg.CloseKey(key)
+        winreg.SetValueEx(k, "LockScreenImagePath", 0, winreg.REG_SZ, str(jpg))
+        winreg.SetValueEx(k, "LockScreenImageUrl", 0, winreg.REG_SZ, str(jpg))
+        winreg.SetValueEx(k, "LockScreenImageStatus", 0, winreg.REG_DWORD, 1)
+        winreg.CloseKey(k)
     except Exception:
         pass
 
 
-def install_runtime(project_dir: Path):
-    write_startup_launcher(project_dir)
-    disable_wallpaper_fade()
+def _hide_overlay():
+    try:
+        u32 = ctypes.windll.user32
+        pm = u32.FindWindowW("Progman", None)
+        if not pm:
+            return
+        hwnds = []
+
+        def cb(h, _):
+            cn = ctypes.create_unicode_buffer(256)
+            u32.GetClassNameW(h, cn, 256)
+            if "DesktopOverlay" in cn.value:
+                hwnds.append(h)
+            return True
+
+        u32.EnumChildWindows(pm, _EnumCB(cb), 0)
+        for h in hwnds:
+            u32.ShowWindow(h, 0)
+            u32.SetWindowPos(h, 0, 0, 0, 0, 0, 0x83)
+    except Exception:
+        pass
 
 
-def main():
-    project_dir = Path(__file__).parent
-    print(f"monochrome-wallpaper | refreshing every {INTERVAL}s")
-    install_runtime(project_dir)
-    threading.Thread(target=overlay_suppression_loop, daemon=True).start()
-
+def _overlay_loop():
     while True:
+        _hide_overlay()
+        time.sleep(0.25)
+
+
+def _disable_fade():
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(k, "WallpaperTransitionMode", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(k)
+    except Exception:
+        pass
+
+
+def _install_startup(proj):
+    startup = Path.home() / "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
+    startup.mkdir(parents=True, exist_ok=True)
+    vbs = startup / "monochrome-wallpaper.vbs"
+    pw = sys.executable.replace("python.exe", "pythonw.exe")
+    if not Path(pw).exists():
+        pw = sys.executable
+    script = proj / "generate_wallpaper.py"
+    vbs.write_text(
+        'Set WshShell = CreateObject("WScript.Shell")\r\n'
+        f'WshShell.Run Chr(34) & "{pw}" & Chr(34) & " " & Chr(34) & "{script}" & Chr(34), 0, False\r\n',
+        encoding="ascii",
+    )
+
+
+# ── main ────────────────────────────────────────────────
+def main():
+    proj = Path(__file__).parent
+    wall = proj / "wallpaper.bmp"
+    lock = proj / "lockscreen.bmp"
+    log = proj / "wallpaper.log"
+
+    def _log(m):
         try:
-            wall_path, lock_path = generate_assets(project_dir)
-            hide_desktop_overlay()
-            apply_wallpaper(wall_path)
-            hide_desktop_overlay()
-            try_set_lock_screen(lock_path)
+            with open(log, "a") as f:
+                f.write(f"[{datetime.now():%H:%M:%S}] {m}\n")
         except Exception:
             pass
+
+    _install_startup(proj)
+    _disable_fade()
+    threading.Thread(target=_overlay_loop, daemon=True).start()
+    _log("started")
+
+    W, H = _screen()
+    while True:
+        try:
+            _collect()
+            _render(wall, W, H, compact=False)
+            _render(lock, W, H, compact=True)
+            _hide_overlay()
+            _apply_wall(wall)
+            _apply_lock(lock)
+            _hide_overlay()
+            _log("ok")
+        except Exception as e:
+            _log(f"err: {e}")
         time.sleep(INTERVAL)
 
 

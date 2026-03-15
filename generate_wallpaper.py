@@ -498,28 +498,19 @@ def _render(out, W, H):
 
     # ── RIGHT: Processes ────────────────────────────────
     ry += 155  # 125 + 30 gap
+    # Left side total height: 210 + 30 + 105 + 30 + 105 = 480
+    # Right side so far: 175 + 30 + 125 + 30 = 360
+    # To match 480 exactly, the Processes box must be exactly 120 high.
     _frame(d, rx, ry, cw, 120, "PROCESSES", f16)
     iy = ry + 28
     d.text((rx + pad, iy), f"{'NAME':<22}{'CPU':>7} {'MEM':>7}", font=f12, fill=DIM)
     iy += 22
     if not procs:
         d.text((rx + pad, iy), "sampling...", font=f12, fill=DIM)
-    for name, cp, mm in procs[:3]:  # Reduced to 3 to fit exact total height of 480
+    for name, cp, mm in procs[:3]:  # Show 3 to comfortably fit the 120 height
         c = BRIGHT if cp > 2 else MID
         d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
         iy += 18
-
-    # ── TIME & DATE (bottom-right, above stamp) ────────
-    if SHOW_TIME:
-        time_str = now.strftime("%H:%M")
-        date_str = now.strftime("%a  %b %d")
-        f28 = _font(28, bold=True)
-        tw_time = d.textlength(time_str, font=f28)
-        tw_date = d.textlength(date_str, font=f14)
-        time_x = W - mx - int(max(tw_time, tw_date))
-        time_y = H - TASKBAR_H - 70
-        d.text((time_x, time_y), time_str, font=f28, fill=BRIGHT)
-        d.text((time_x, time_y + 36), date_str, font=f14, fill=DIM)
 
     # ── DECORATIONS ─────────────────────────────────────
     ac = (38, 38, 38)

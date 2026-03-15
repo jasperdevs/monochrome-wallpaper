@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
 
         # Header Title
         title = QLabel("Monochrome Settings")
-        title.setFont(QFont("Segoe UI Variable Display", 18, QFont.Weight.SemiBold))
+        title.setFont(QFont("Segoe UI Variable Display", 18, QFont.Weight.DemiBold))
         title.setObjectName("titleLabel")
         layout.addWidget(title)
 

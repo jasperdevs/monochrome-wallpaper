@@ -530,7 +530,8 @@ def _render(out, W, H, cfg):
         ry += 150
 
     # ── DECORATIONS ─────────────────────────────────────
-    d.text((mx - 10, top - 20), "+----", font=f10 := _font(10), fill=DIM)
+    f10 = _font(10)
+    d.text((mx - 10, top - 20), "+----", font=f10, fill=DIM)
     d.text((W - mx - 25, top - 20), "----+", font=f10, fill=DIM)
     
     bot_y = max(ly, ry) - 30 + 10

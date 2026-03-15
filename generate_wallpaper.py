@@ -378,7 +378,13 @@ def _bar(d, x, y, w, pct, h=14):
     d.rectangle((x, y, x + w, y + h), fill=BAR_BG, outline=DIM)
     fill = max(0, int((w - 4) * min(max(pct, 0), 100) / 100))
     if fill > 0:
-        d.rectangle((x + 2, y + 2, x + 2 + fill, y + h - 2), fill=BAR_FILL)
+        # Draw segmented blocks instead of one solid fill
+        block_w = 4
+        gap = 2
+        for bx in range(2, fill, block_w + gap):
+            seg_w = min(block_w, fill - bx)
+            if seg_w > 0:
+                d.rectangle((x + bx, y + 2, x + bx + seg_w, y + h - 2), fill=BAR_FILL)
 
 
 def _spark(d, x, y, vals, w, h):
@@ -444,7 +450,7 @@ def _render(out, W, H):
     d.text((lx + pad, iy), f"up:   {_uptime()}    os:  {_os_name()}", font=f14, fill=MID)
 
     # ── LEFT: Memory ────────────────────────────────────
-    ly += 240
+    ly += 240  # 210 (system) + 30 (gap)
     _frame(d, lx, ly, cw, 105, "MEMORY", f16)
     iy = ly + 32
     ug = ram.used / (1024**3)
@@ -454,7 +460,7 @@ def _render(out, W, H):
     _bar(d, lx + pad, iy, inner, ram.percent)
 
     # ── LEFT: Storage ───────────────────────────────────
-    ly += 135
+    ly += 135  # 105 (memory) + 30 (gap)
     _frame(d, lx, ly, cw, 105, "STORAGE", f16)
     iy = ly + 32
     ug = (disk.total - disk.free) / (1024**3)
@@ -465,12 +471,12 @@ def _render(out, W, H):
 
     # ── RIGHT: Weather ──────────────────────────────────
     ry = top
-    _frame(d, rx, ry, cw, 190, "WEATHER", f16)
+    _frame(d, rx, ry, cw, 160, "WEATHER", f16)
     if weather:
-        ay = ry + 30
+        ay = ry + 26
         for line in _wmo_art(weather["code"]):
             d.text((rx + pad, ay), line, font=f16, fill=MID)
-            ay += 22
+            ay += 20
         d.text((rx + 230, ry + 36), f"{weather['temp']}F", font=f32, fill=WHITE)
         d.text((rx + 232, ry + 82), weather["desc"], font=f16, fill=BRIGHT)
         feels = weather.get("feels", weather["temp"])
@@ -479,29 +485,29 @@ def _render(out, W, H):
         d.text((rx + pad, ry + 60), "no data", font=f16, fill=DIM)
 
     # ── RIGHT: Network ──────────────────────────────────
-    ry += 220
-    _frame(d, rx, ry, cw, 130, "NETWORK", f16)
+    ry += 190  # 160 (weather) + 30 (gap)
+    _frame(d, rx, ry, cw, 125, "NETWORK", f16)
     iy = ry + 32
     d.text((rx + pad, iy), "up:", font=f14, fill=DIM)
     d.text((rx + pad + 40, iy), _fmt_bytes(sent), font=f18, fill=WHITE)
     d.text((rx + cw // 2, iy), "down:", font=f14, fill=DIM)
     d.text((rx + cw // 2 + 60, iy), _fmt_bytes(recv), font=f18, fill=WHITE)
     iy += 40
-    _graph_bg(d, rx + pad, iy, inner, 40)
-    _spark(d, rx + pad, iy, net_d, inner, 40)
+    _graph_bg(d, rx + pad, iy, inner, 35)
+    _spark(d, rx + pad, iy, net_d, inner, 35)
 
     # ── RIGHT: Processes ────────────────────────────────
-    ry += 160
-    _frame(d, rx, ry, cw, 150, "PROCESSES", f16)
-    iy = ry + 32
+    ry += 155  # 125 (network) + 30 (gap)
+    _frame(d, rx, ry, cw, 135, "PROCESSES", f16)
+    iy = ry + 28
     d.text((rx + pad, iy), f"{'NAME':<22}{'CPU':>7} {'MEM':>7}", font=f12, fill=DIM)
     iy += 22
     if not procs:
         d.text((rx + pad, iy), "sampling...", font=f12, fill=DIM)
-    for name, cp, mm in procs:
+    for name, cp, mm in procs[:4]: # only show 4 to fit exact height
         c = BRIGHT if cp > 2 else MID
         d.text((rx + pad, iy), f"{name[:20]:<22}{cp:6.1f}% {mm:6.1f}%", font=f12, fill=c)
-        iy += 20
+        iy += 18
 
     # ── TIME & DATE (bottom-right, above stamp) ────────
     if SHOW_TIME:
@@ -516,34 +522,21 @@ def _render(out, W, H):
         d.text((time_x, time_y + 36), date_str, font=f14, fill=DIM)
 
     # ── DECORATIONS ─────────────────────────────────────
-    ac = (34, 34, 34)
+    ac = (38, 38, 38)
+    f10 = _font(10)
 
-    # top-left: subtle corner bracket
-    d.line((mx, 40, mx + 60, 40), fill=ac, width=1)
-    d.line((mx, 40, mx, 100), fill=ac, width=1)
+    # Clean text-based corner markers
+    d.text((mx - 10, top - 20), "+----", font=f10, fill=ac)
+    d.text((W - mx - 25, top - 20), "----+", font=f10, fill=ac)
+    
+    bot_y = ly + 105 + 10 # Bottom of the last box (STORAGE) + small padding
+    d.text((mx - 10, bot_y), "+----", font=f10, fill=ac)
+    d.text((W - mx - 25, bot_y), "----+", font=f10, fill=ac)
 
-    # top-right: matching corner bracket
-    d.line((W - mx - 60, 40, W - mx, 40), fill=ac, width=1)
-    d.line((W - mx, 40, W - mx, 100), fill=ac, width=1)
-
-    # bottom-left: corner bracket
-    bot = H - TASKBAR_H - 20
-    d.line((mx, bot - 60, mx, bot), fill=ac, width=1)
-    d.line((mx, bot, mx + 60, bot), fill=ac, width=1)
-
-    # bottom-right: corner bracket
-    d.line((W - mx, bot - 60, W - mx, bot), fill=ac, width=1)
-    d.line((W - mx - 60, bot, W - mx, bot), fill=ac, width=1)
-
-    # thin horizontal rule above the bottom stamp
-    rule_y = H - TASKBAR_H - 8
-    for i in range(0, W - mx * 2, 6):
-        d.point((mx + i, rule_y), fill=ac)
-
-    # center dotted line between columns
+    # center pipe
     pipe_x = lx + cw + gap // 2
-    for yp in range(top + 10, top + 510, 8):
-        d.point((pipe_x, yp), fill=ac)
+    for yp in range(top, bot_y, 24):
+        d.text((pipe_x, yp), "|", font=f12, fill=ac)
 
     # ── BOTTOM STAMP ────────────────────────────────────
     stamp = f"updated {now.strftime('%H:%M:%S')}  |  {INTERVAL}s"
